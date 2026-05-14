@@ -1,0 +1,308 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  PARTNER
+  ADMIN
+}
+
+enum CompanionStatus {
+  UNDER_REVIEW
+  ACTIVE
+  SUSPENDED
+}
+
+enum PartnerApplicationStatus {
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  NEEDS_INFO
+}
+
+enum ServiceType {
+  CHAT
+  AUDIO
+  VIDEO
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+enum SessionStatus {
+  PENDING
+  LIVE
+  COMPLETED
+  FAILED
+  FLAGGED
+}
+
+enum TransactionType {
+  RECHARGE
+  BOOKING
+  REFUND
+  ADMIN_CREDIT
+}
+
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum PayoutStatus {
+  REQUESTED
+  APPROVED
+  PAID
+  REJECTED
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  FAILED
+  NEEDS_REVIEW
+}
+
+model User {
+  id             String            @id @default(cuid())
+  firebaseUid    String            @unique
+  phoneNumber    String            @unique
+  name           String?
+  role           Role              @default(USER)
+  isBlocked      Boolean           @default(false)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  companion      Companion?
+  partnerApplications PartnerApplication[]
+  walletAccount  WalletAccount?
+  bookings       Booking[]
+  sessions       Session[]         @relation("UserSessions")
+  reviews        Review[]          @relation("UserReviews")
+  supportTickets SupportTicket[]
+}
+
+model Companion {
+  id                  String                 @id @default(cuid())
+  userId              String                 @unique
+  user                User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  displayName         String
+  tagline             String?
+  city                String?
+  category            String?
+  languages           String[]
+  servicesOffered     ServiceType[]
+  chatPrice           Int                    @default(0)
+  audioPrice          Int                    @default(0)
+  videoPrice          Int                    @default(0)
+  rating              Float                  @default(0)
+  status              CompanionStatus        @default(UNDER_REVIEW)
+  verificationStatus  VerificationStatus     @default(PENDING)
+  isOnline            Boolean                @default(false)
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  bookings            Booking[]
+  sessions            Session[]              @relation("CompanionSessions")
+  partnerApplications PartnerApplication[]
+  payouts             Payout[]
+  reviews             Review[]               @relation("CompanionReviews")
+  verificationRecord  VerificationRecord?
+}
+
+model PartnerApplication {
+  id                 String                   @id @default(cuid())
+  applicantUserId    String
+  applicantUser      User                     @relation(fields: [applicantUserId], references: [id], onDelete: Cascade)
+  companionId        String?
+  companion          Companion?               @relation(fields: [companionId], references: [id], onDelete: SetNull)
+  fullName           String
+  age                Int
+  gender             String
+  religion           String?
+  bornCity           String?
+  nationality        String?
+  school             String?
+  college            String?
+  qualification      String?
+  languagesKnown     String[]
+  communicationStyle String[]
+  hobbies            String[]
+  profileTagline     String
+  aboutYourself      String
+  servicesOffered    ServiceType[]
+  chatPrice          Int                      @default(0)
+  audioPrice         Int                      @default(0)
+  videoPrice         Int                      @default(0)
+  categories         String[]
+  safetyChecklist    String[]
+  status             PartnerApplicationStatus @default(UNDER_REVIEW)
+  adminNote          String?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+}
+
+model Booking {
+  id             String        @id @default(cuid())
+  bookingCode    String        @unique
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companionId    String
+  companion      Companion     @relation(fields: [companionId], references: [id], onDelete: Cascade)
+  serviceType    ServiceType
+  amount         Int
+  status         BookingStatus @default(PENDING)
+  scheduledAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  session        Session?
+  transactions   WalletTransaction[]
+}
+
+model Session {
+  id               String        @id @default(cuid())
+  sessionCode      String        @unique
+  bookingId        String?       @unique
+  booking          Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  userId           String
+  user             User          @relation("UserSessions", fields: [userId], references: [id], onDelete: Cascade)
+  companionId      String
+  companion        Companion     @relation("CompanionSessions", fields: [companionId], references: [id], onDelete: Cascade)
+  serviceType      ServiceType
+  status           SessionStatus @default(PENDING)
+  startedAt        DateTime?
+  endedAt          DateTime?
+  durationSeconds  Int           @default(0)
+  amount           Int           @default(0)
+  platformFee      Int           @default(0)
+  companionEarning Int           @default(0)
+  safetyFlag       Boolean       @default(false)
+  safetyNote       String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+}
+
+model WalletAccount {
+  id             String              @id @default(cuid())
+  userId         String              @unique
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance        Int                 @default(0)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  transactions   WalletTransaction[]
+}
+
+model WalletTransaction {
+  id               String            @id @default(cuid())
+  transactionCode  String            @unique
+  walletAccountId  String
+  walletAccount    WalletAccount     @relation(fields: [walletAccountId], references: [id], onDelete: Cascade)
+  bookingId        String?
+  booking          Booking?          @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  type             TransactionType
+  amount           Int
+  status           TransactionStatus @default(PENDING)
+  gateway          String?
+  referenceId      String?
+  reason           String?
+  createdAt        DateTime          @default(now())
+}
+
+model Payout {
+  id             String       @id @default(cuid())
+  payoutCode     String       @unique
+  companionId    String
+  companion      Companion    @relation(fields: [companionId], references: [id], onDelete: Cascade)
+  amount         Int
+  status         PayoutStatus @default(REQUESTED)
+  requestedAt    DateTime     @default(now())
+  processedAt    DateTime?
+  rejectionReason String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model Review {
+  id            String      @id @default(cuid())
+  userId        String
+  user          User        @relation("UserReviews", fields: [userId], references: [id], onDelete: Cascade)
+  companionId   String
+  companion     Companion   @relation("CompanionReviews", fields: [companionId], references: [id], onDelete: Cascade)
+  rating        Int
+  comment       String
+  isApproved    Boolean     @default(false)
+  isHidden      Boolean     @default(false)
+  isFlagged     Boolean     @default(false)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+model SupportTicket {
+  id            String      @id @default(cuid())
+  ticketCode    String      @unique
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject       String
+  type          String
+  priority      String      @default("MEDIUM")
+  status        String      @default("OPEN")
+  message       String
+  internalNotes String[]
+  assignedTo    String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+model VerificationRecord {
+  id                  String             @id @default(cuid())
+  companionId         String             @unique
+  companion           Companion          @relation(fields: [companionId], references: [id], onDelete: Cascade)
+  idVerification      VerificationStatus @default(PENDING)
+  policeVerification  VerificationStatus @default(PENDING)
+  psychometricTest    VerificationStatus @default(PENDING)
+  interviewStatus     VerificationStatus @default(PENDING)
+  trainingStatus      VerificationStatus @default(PENDING)
+  overallStatus       VerificationStatus @default(PENDING)
+  updatedAt           DateTime           @updatedAt
+}
+
+model PlatformSetting {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       Json
+  updatedAt   DateTime @updatedAt
+}
+
+model MediaItem {
+  id          String   @id @default(cuid())
+  title       String
+  publisher   String?
+  type        String
+  imageUrl    String?
+  linkUrl     String?
+  status      String   @default("DRAFT")
+  publishedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model ClientDiary {
+  id          String   @id @default(cuid())
+  title       String
+  subtitle    String?
+  imageUrl    String?
+  videoUrl    String?
+  status      String   @default("DRAFT")
+  publishedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
