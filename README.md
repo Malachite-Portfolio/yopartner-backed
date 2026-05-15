@@ -94,3 +94,4 @@ Server default: `http://localhost:8080`
 - User-facing APIs intentionally exclude Home Visit.
 - Payment gateway verification is structured but gateway signature validation should be finalized in production.
 - For admin bootstrap in production, set `ADMIN_UID_ALLOWLIST` and/or `ADMIN_PHONE_ALLOWLIST` once, then rely on DB roles.
+- Run `npm run db:seed:demo-host` only when a controlled client demo host is needed in the real database.
