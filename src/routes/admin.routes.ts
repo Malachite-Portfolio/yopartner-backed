@@ -154,8 +154,16 @@ adminRouter.get(
 adminRouter.patch(
   "/applications/:id",
   asyncHandler(async (req, res) => {
-    const status = req.body.status as PartnerApplicationStatus | undefined;
-    if (!status) throw new HttpError(400, "status is required.");
+    const rawStatus = typeof req.body.status === "string" ? req.body.status.trim().toUpperCase() : "";
+    const status =
+      rawStatus === PartnerApplicationStatus.APPROVED ||
+      rawStatus === PartnerApplicationStatus.REJECTED ||
+      rawStatus === PartnerApplicationStatus.NEEDS_INFO
+        ? (rawStatus as PartnerApplicationStatus)
+        : undefined;
+    if (!status) {
+      throw new HttpError(400, "status must be APPROVED, REJECTED, or NEEDS_INFO.");
+    }
     const application = await prisma.partnerApplication.findUnique({ where: { id: String(req.params.id) } });
     if (!application) throw new HttpError(404, "Application not found.");
 
@@ -169,6 +177,11 @@ adminRouter.patch(
       });
 
       if (status === PartnerApplicationStatus.APPROVED) {
+        await tx.user.update({
+          where: { id: application.applicantUserId },
+          data: { role: Role.PARTNER },
+        });
+
         const companion =
           application.companionId
             ? await tx.companion.findUnique({ where: { id: application.companionId } })
@@ -177,7 +190,10 @@ adminRouter.patch(
         if (companion) {
           await tx.companion.update({
             where: { id: companion.id },
-            data: { status: CompanionStatus.ACTIVE },
+            data: {
+              status: CompanionStatus.ACTIVE,
+              verificationStatus: VerificationStatus.VERIFIED,
+            },
           });
         } else {
           const createdCompanion = await tx.companion.create({
@@ -193,6 +209,7 @@ adminRouter.patch(
               audioPrice: application.audioPrice,
               videoPrice: application.videoPrice,
               status: CompanionStatus.ACTIVE,
+              verificationStatus: VerificationStatus.VERIFIED,
             },
           });
           await tx.partnerApplication.update({
