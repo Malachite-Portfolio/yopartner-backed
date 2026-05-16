@@ -9,15 +9,14 @@ import {
   TransactionType,
   VerificationStatus,
 } from "@prisma/client";
-import { requireAuth } from "../middlewares/auth";
-import { requireRole } from "../middlewares/roles";
+import { requireAdminAccess } from "../middlewares/adminAccess";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { createCode, HttpError } from "../utils/http";
 
 export const adminRouter = Router();
 
-adminRouter.use(requireAuth, requireRole([Role.ADMIN]));
+adminRouter.use(requireAdminAccess);
 
 adminRouter.get(
   "/dashboard",

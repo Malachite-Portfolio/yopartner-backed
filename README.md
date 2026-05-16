@@ -10,6 +10,7 @@ Railway-ready backend for YoPartner using:
 
 - Firebase token auth middleware (`Bearer <idToken>`)
 - Role middleware with optional admin allowlist bootstrap
+- Admin ID/password login endpoint issuing admin JWT (`Bearer <adminToken>`)
 - Companion APIs
 - Partner onboarding and dashboard APIs
 - Booking/session APIs (Chat/Audio/Video only)
@@ -86,6 +87,8 @@ Server default: `http://localhost:8080`
 - `POST /api/wallet/recharge-order`
 - `POST /api/wallet/verify-recharge`
 - `GET/PATCH admin endpoints under /api/admin/*`
+- `POST /api/admin/auth/login`
+- `GET /api/admin/auth/me`
 - `POST /api/agora/token/rtc`
 - `POST /api/agora/token/chat`
 
@@ -94,4 +97,5 @@ Server default: `http://localhost:8080`
 - User-facing APIs intentionally exclude Home Visit.
 - Payment gateway verification is structured but gateway signature validation should be finalized in production.
 - For admin bootstrap in production, set `ADMIN_UID_ALLOWLIST` and/or `ADMIN_PHONE_ALLOWLIST` once, then rely on DB roles.
+- For admin ID/password login, set `ADMIN_LOGIN_ID`, `ADMIN_LOGIN_PASSWORD`, and `ADMIN_JWT_SECRET`.
 - Run `npm run db:seed:demo-host` only when a controlled client demo host is needed in the real database.

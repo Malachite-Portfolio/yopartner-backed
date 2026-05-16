@@ -5,4 +5,6 @@ export type AuthUser = {
   firebaseUid: string;
   phoneNumber: string;
   role: Role;
+  authType?: "firebase" | "admin_jwt";
+  adminLoginId?: string;
 };
