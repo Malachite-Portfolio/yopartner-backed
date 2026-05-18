@@ -28,6 +28,22 @@ const onboardingSchema = z.object({
   videoPrice: z.number().int().nonnegative(),
   categories: z.array(z.string()).min(1),
   safetyChecklist: z.array(z.string()).min(4),
+  selfieUploaded: z.boolean().optional(),
+  selfieFileName: z.string().optional(),
+  selfieStoragePath: z.string().optional(),
+  selfieUrl: z.string().optional(),
+  aadhaarFrontUploaded: z.boolean().optional(),
+  aadhaarFrontFileName: z.string().optional(),
+  aadhaarFrontStoragePath: z.string().optional(),
+  aadhaarFrontUrl: z.string().optional(),
+  aadhaarBackUploaded: z.boolean().optional(),
+  aadhaarBackFileName: z.string().optional(),
+  aadhaarBackStoragePath: z.string().optional(),
+  aadhaarBackUrl: z.string().optional(),
+  panUploaded: z.boolean().optional(),
+  panFileName: z.string().optional(),
+  panStoragePath: z.string().optional(),
+  panUrl: z.string().optional(),
 });
 
 const toServiceType = (value: string): ServiceType | null => {
@@ -37,6 +53,31 @@ const toServiceType = (value: string): ServiceType | null => {
   if (normalized === "video" || normalized === "video call") return ServiceType.VIDEO;
   return null;
 };
+
+function sanitizeOptionalString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function sanitizeKycDocument(input: {
+  uploaded?: boolean;
+  fileName?: string;
+  storagePath?: string;
+  url?: string;
+}) {
+  const fileName = sanitizeOptionalString(input.fileName);
+  const storagePath = sanitizeOptionalString(input.storagePath);
+  const url = sanitizeOptionalString(input.url);
+  const uploaded = Boolean(input.uploaded) && Boolean(fileName || storagePath || url);
+
+  return {
+    uploaded,
+    fileName,
+    storagePath,
+    url,
+  };
+}
 
 export const partnerRouter = Router();
 
@@ -50,6 +91,31 @@ partnerRouter.post(
     if (servicesOffered.length === 0) {
       throw new HttpError(400, "At least one valid service is required.");
     }
+
+    const selfie = sanitizeKycDocument({
+      uploaded: payload.selfieUploaded,
+      fileName: payload.selfieFileName,
+      storagePath: payload.selfieStoragePath,
+      url: payload.selfieUrl,
+    });
+    const aadhaarFront = sanitizeKycDocument({
+      uploaded: payload.aadhaarFrontUploaded,
+      fileName: payload.aadhaarFrontFileName,
+      storagePath: payload.aadhaarFrontStoragePath,
+      url: payload.aadhaarFrontUrl,
+    });
+    const aadhaarBack = sanitizeKycDocument({
+      uploaded: payload.aadhaarBackUploaded,
+      fileName: payload.aadhaarBackFileName,
+      storagePath: payload.aadhaarBackStoragePath,
+      url: payload.aadhaarBackUrl,
+    });
+    const pan = sanitizeKycDocument({
+      uploaded: payload.panUploaded,
+      fileName: payload.panFileName,
+      storagePath: payload.panStoragePath,
+      url: payload.panUrl,
+    });
 
     const application = await prisma.partnerApplication.create({
       data: {
@@ -74,6 +140,22 @@ partnerRouter.post(
         videoPrice: payload.videoPrice,
         categories: payload.categories,
         safetyChecklist: payload.safetyChecklist,
+        selfieUploaded: selfie.uploaded,
+        selfieFileName: selfie.fileName,
+        selfieStoragePath: selfie.storagePath,
+        selfieUrl: selfie.url,
+        aadhaarFrontUploaded: aadhaarFront.uploaded,
+        aadhaarFrontFileName: aadhaarFront.fileName,
+        aadhaarFrontStoragePath: aadhaarFront.storagePath,
+        aadhaarFrontUrl: aadhaarFront.url,
+        aadhaarBackUploaded: aadhaarBack.uploaded,
+        aadhaarBackFileName: aadhaarBack.fileName,
+        aadhaarBackStoragePath: aadhaarBack.storagePath,
+        aadhaarBackUrl: aadhaarBack.url,
+        panUploaded: pan.uploaded,
+        panFileName: pan.fileName,
+        panStoragePath: pan.storagePath,
+        panUrl: pan.url,
       },
     });
 

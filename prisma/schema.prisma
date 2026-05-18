@@ -145,6 +145,22 @@ model PartnerApplication {
   videoPrice         Int                      @default(0)
   categories         String[]
   safetyChecklist    String[]
+  selfieUploaded     Boolean                  @default(false)
+  selfieFileName     String?
+  selfieStoragePath  String?
+  selfieUrl          String?
+  aadhaarFrontUploaded Boolean                @default(false)
+  aadhaarFrontFileName String?
+  aadhaarFrontStoragePath String?
+  aadhaarFrontUrl    String?
+  aadhaarBackUploaded Boolean                 @default(false)
+  aadhaarBackFileName String?
+  aadhaarBackStoragePath String?
+  aadhaarBackUrl     String?
+  panUploaded        Boolean                  @default(false)
+  panFileName        String?
+  panStoragePath     String?
+  panUrl             String?
   status             PartnerApplicationStatus @default(UNDER_REVIEW)
   adminNote          String?
   createdAt          DateTime                 @default(now())
