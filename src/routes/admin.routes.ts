@@ -151,6 +151,49 @@ adminRouter.get(
   }),
 );
 
+adminRouter.get(
+  "/applications/:id",
+  asyncHandler(async (req, res) => {
+    const application = await prisma.partnerApplication.findUnique({
+      where: { id: String(req.params.id) },
+      include: {
+        applicantUser: {
+          select: {
+            id: true,
+            firebaseUid: true,
+            phoneNumber: true,
+            name: true,
+            role: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+        companion: {
+          select: {
+            id: true,
+            userId: true,
+            displayName: true,
+            city: true,
+            category: true,
+            languages: true,
+            servicesOffered: true,
+            chatPrice: true,
+            audioPrice: true,
+            videoPrice: true,
+            status: true,
+            verificationStatus: true,
+            isOnline: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+    if (!application) throw new HttpError(404, "Application not found.");
+    res.json({ application });
+  }),
+);
+
 adminRouter.patch(
   "/applications/:id",
   asyncHandler(async (req, res) => {
