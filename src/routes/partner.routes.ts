@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { CompanionStatus, Role, ServiceType, SessionStatus, VerificationStatus } from "@prisma/client";
-import { z } from "zod";
+import { CompanionStatus, Prisma, Role, ServiceType, SessionStatus, VerificationStatus } from "@prisma/client";
+import { z, ZodError } from "zod";
 import { requireAuth } from "../middlewares/auth";
 import { requireRole } from "../middlewares/roles";
 import { asyncHandler } from "../utils/asyncHandler";
@@ -23,9 +23,11 @@ const onboardingSchema = z.object({
   profileTagline: z.string().min(6),
   aboutYourself: z.string().min(80),
   servicesOffered: z.array(z.string()).min(1),
-  chatPrice: z.number().int().nonnegative(),
-  audioPrice: z.number().int().nonnegative(),
-  videoPrice: z.number().int().nonnegative(),
+  chatPrice: z.coerce.number().int().nonnegative(),
+  audioPrice: z.coerce.number().int().nonnegative(),
+  videoPrice: z.coerce.number().int().nonnegative(),
+  homeVisitRequested: z.boolean().optional(),
+  homeVisitPrice: z.coerce.number().int().nonnegative().optional(),
   categories: z.array(z.string()).min(1),
   safetyChecklist: z.array(z.string()).min(4),
   selfieUploaded: z.boolean().optional(),
@@ -50,6 +52,9 @@ const partnerAvailabilitySchema = z.object({
   isOnline: z.boolean(),
 });
 
+const MAX_CHAT_AUDIO_VIDEO_PRICE = 10000;
+const MAX_HOME_VISIT_PRICE = 100000;
+
 const toServiceType = (value: string): ServiceType | null => {
   const normalized = value.trim().toLowerCase();
   if (normalized === "chat") return ServiceType.CHAT;
@@ -57,6 +62,14 @@ const toServiceType = (value: string): ServiceType | null => {
   if (normalized === "video" || normalized === "video call") return ServiceType.VIDEO;
   return null;
 };
+
+function normalizePriceValue(field: string, value: unknown, maxValue: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0 || parsed > maxValue) {
+    throw new HttpError(400, `${field} must be a valid number between 0 and ${maxValue}.`);
+  }
+  return parsed;
+}
 
 function sanitizeOptionalString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -90,85 +103,145 @@ partnerRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const payload = onboardingSchema.parse(req.body);
-    const servicesOffered = payload.servicesOffered.map(toServiceType).filter((value): value is ServiceType => value !== null);
-    if (servicesOffered.length === 0) {
-      throw new HttpError(400, "At least one valid service is required.");
+
+    try {
+      const parsed = onboardingSchema.safeParse(req.body);
+      if (!parsed.success) {
+        console.error("Partner application submit failed", {
+          message: "Validation failed",
+          code: "VALIDATION_ERROR",
+          meta: parsed.error.flatten(),
+        });
+        res.status(400).json({
+          error: "Unable to submit partner application.",
+          detail: "VALIDATION_ERROR",
+        });
+        return;
+      }
+      const payload = parsed.data;
+
+      const servicesOffered = payload.servicesOffered
+        .map(toServiceType)
+        .filter((value): value is ServiceType => value !== null);
+      if (servicesOffered.length === 0) {
+        throw new HttpError(400, "At least one valid service is required.");
+      }
+
+      const chatPrice = normalizePriceValue("chatPrice", payload.chatPrice, MAX_CHAT_AUDIO_VIDEO_PRICE);
+      const audioPrice = normalizePriceValue("audioPrice", payload.audioPrice, MAX_CHAT_AUDIO_VIDEO_PRICE);
+      const videoPrice = normalizePriceValue("videoPrice", payload.videoPrice, MAX_CHAT_AUDIO_VIDEO_PRICE);
+      if (payload.homeVisitPrice !== undefined) {
+        normalizePriceValue("homeVisitPrice", payload.homeVisitPrice, MAX_HOME_VISIT_PRICE);
+      }
+
+      const selfie = sanitizeKycDocument({
+        uploaded: payload.selfieUploaded,
+        fileName: payload.selfieFileName,
+        storagePath: payload.selfieStoragePath,
+        url: payload.selfieUrl,
+      });
+      const aadhaarFront = sanitizeKycDocument({
+        uploaded: payload.aadhaarFrontUploaded,
+        fileName: payload.aadhaarFrontFileName,
+        storagePath: payload.aadhaarFrontStoragePath,
+        url: payload.aadhaarFrontUrl,
+      });
+      const aadhaarBack = sanitizeKycDocument({
+        uploaded: payload.aadhaarBackUploaded,
+        fileName: payload.aadhaarBackFileName,
+        storagePath: payload.aadhaarBackStoragePath,
+        url: payload.aadhaarBackUrl,
+      });
+      const pan = sanitizeKycDocument({
+        uploaded: payload.panUploaded,
+        fileName: payload.panFileName,
+        storagePath: payload.panStoragePath,
+        url: payload.panUrl,
+      });
+
+      const application = await prisma.partnerApplication.create({
+        data: {
+          applicantUserId: authUser.id,
+          fullName: payload.fullName,
+          age: payload.age,
+          gender: payload.gender,
+          religion: payload.religion,
+          bornCity: payload.bornCity,
+          nationality: payload.nationality,
+          school: payload.school,
+          college: payload.college,
+          qualification: payload.qualification,
+          languagesKnown: payload.languagesKnown,
+          communicationStyle: payload.communicationStyle,
+          hobbies: payload.hobbies,
+          profileTagline: payload.profileTagline,
+          aboutYourself: payload.aboutYourself,
+          servicesOffered,
+          chatPrice,
+          audioPrice,
+          videoPrice,
+          categories: payload.categories,
+          safetyChecklist: payload.safetyChecklist,
+          selfieUploaded: selfie.uploaded,
+          selfieFileName: selfie.fileName,
+          selfieStoragePath: selfie.storagePath,
+          selfieUrl: selfie.url,
+          aadhaarFrontUploaded: aadhaarFront.uploaded,
+          aadhaarFrontFileName: aadhaarFront.fileName,
+          aadhaarFrontStoragePath: aadhaarFront.storagePath,
+          aadhaarFrontUrl: aadhaarFront.url,
+          aadhaarBackUploaded: aadhaarBack.uploaded,
+          aadhaarBackFileName: aadhaarBack.fileName,
+          aadhaarBackStoragePath: aadhaarBack.storagePath,
+          aadhaarBackUrl: aadhaarBack.url,
+          panUploaded: pan.uploaded,
+          panFileName: pan.fileName,
+          panStoragePath: pan.storagePath,
+          panUrl: pan.url,
+        },
+      });
+
+      await prisma.user.update({
+        where: { id: authUser.id },
+        data: { role: Role.PARTNER, name: payload.fullName },
+      });
+
+      res.status(201).json({ application });
+    } catch (error) {
+      const httpStatus = error instanceof HttpError ? error.statusCode : undefined;
+      const detail =
+        httpStatus === 401 || httpStatus === 403
+          ? "AUTH_ERROR"
+          : error instanceof HttpError || error instanceof ZodError
+            ? "VALIDATION_ERROR"
+          : error instanceof Prisma.PrismaClientKnownRequestError || error instanceof Prisma.PrismaClientValidationError
+            ? "DATABASE_ERROR"
+            : "DATABASE_ERROR";
+
+      console.error("Partner application submit failed", {
+        message: error instanceof Error ? error.message : "Unknown error",
+        code:
+          typeof error === "object" && error && "code" in error
+            ? String((error as { code?: unknown }).code ?? "")
+            : undefined,
+        meta:
+          typeof error === "object" && error && "meta" in error
+            ? (error as { meta?: unknown }).meta
+            : undefined,
+        stack: process.env.NODE_ENV !== "production" && error instanceof Error ? error.stack : undefined,
+      });
+
+      const statusCode =
+        detail === "AUTH_ERROR"
+          ? (httpStatus ?? 401)
+          : detail === "VALIDATION_ERROR"
+            ? 400
+            : 500;
+      res.status(statusCode).json({
+        error: "Unable to submit partner application.",
+        detail,
+      });
     }
-
-    const selfie = sanitizeKycDocument({
-      uploaded: payload.selfieUploaded,
-      fileName: payload.selfieFileName,
-      storagePath: payload.selfieStoragePath,
-      url: payload.selfieUrl,
-    });
-    const aadhaarFront = sanitizeKycDocument({
-      uploaded: payload.aadhaarFrontUploaded,
-      fileName: payload.aadhaarFrontFileName,
-      storagePath: payload.aadhaarFrontStoragePath,
-      url: payload.aadhaarFrontUrl,
-    });
-    const aadhaarBack = sanitizeKycDocument({
-      uploaded: payload.aadhaarBackUploaded,
-      fileName: payload.aadhaarBackFileName,
-      storagePath: payload.aadhaarBackStoragePath,
-      url: payload.aadhaarBackUrl,
-    });
-    const pan = sanitizeKycDocument({
-      uploaded: payload.panUploaded,
-      fileName: payload.panFileName,
-      storagePath: payload.panStoragePath,
-      url: payload.panUrl,
-    });
-
-    const application = await prisma.partnerApplication.create({
-      data: {
-        applicantUserId: authUser.id,
-        fullName: payload.fullName,
-        age: payload.age,
-        gender: payload.gender,
-        religion: payload.religion,
-        bornCity: payload.bornCity,
-        nationality: payload.nationality,
-        school: payload.school,
-        college: payload.college,
-        qualification: payload.qualification,
-        languagesKnown: payload.languagesKnown,
-        communicationStyle: payload.communicationStyle,
-        hobbies: payload.hobbies,
-        profileTagline: payload.profileTagline,
-        aboutYourself: payload.aboutYourself,
-        servicesOffered,
-        chatPrice: payload.chatPrice,
-        audioPrice: payload.audioPrice,
-        videoPrice: payload.videoPrice,
-        categories: payload.categories,
-        safetyChecklist: payload.safetyChecklist,
-        selfieUploaded: selfie.uploaded,
-        selfieFileName: selfie.fileName,
-        selfieStoragePath: selfie.storagePath,
-        selfieUrl: selfie.url,
-        aadhaarFrontUploaded: aadhaarFront.uploaded,
-        aadhaarFrontFileName: aadhaarFront.fileName,
-        aadhaarFrontStoragePath: aadhaarFront.storagePath,
-        aadhaarFrontUrl: aadhaarFront.url,
-        aadhaarBackUploaded: aadhaarBack.uploaded,
-        aadhaarBackFileName: aadhaarBack.fileName,
-        aadhaarBackStoragePath: aadhaarBack.storagePath,
-        aadhaarBackUrl: aadhaarBack.url,
-        panUploaded: pan.uploaded,
-        panFileName: pan.fileName,
-        panStoragePath: pan.storagePath,
-        panUrl: pan.url,
-      },
-    });
-
-    await prisma.user.update({
-      where: { id: authUser.id },
-      data: { role: Role.PARTNER, name: payload.fullName },
-    });
-
-    res.status(201).json({ application });
   }),
 );
 
@@ -202,7 +275,6 @@ partnerRouter.get(
 partnerRouter.get(
   "/dashboard",
   requireAuth,
-  requireRole([Role.PARTNER, Role.ADMIN]),
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const [companion, application] = await Promise.all([
@@ -320,6 +392,14 @@ partnerRouter.get(
     }
 
     res.json({
+      hasApplication: Boolean(application),
+      applicationStatus: application?.status ?? "NOT_SUBMITTED",
+      companionStatus: companion?.status ?? "UNDER_REVIEW",
+      verificationStatus: companion?.verificationStatus ?? "PENDING",
+      kycStatus:
+        companion?.verificationStatus === VerificationStatus.VERIFIED
+          ? "VERIFIED"
+          : "PENDING",
       approvalState: {
         applicationStatus: application?.status ?? "NOT_SUBMITTED",
         kycStatus:
@@ -458,7 +538,6 @@ partnerRouter.get(
 partnerRouter.patch(
   "/availability",
   requireAuth,
-  requireRole([Role.PARTNER]),
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const payload = partnerAvailabilitySchema.parse(req.body);
