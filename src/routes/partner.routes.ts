@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { CompanionStatus, Role, ServiceType } from "@prisma/client";
+import { CompanionStatus, Role, ServiceType, SessionStatus, VerificationStatus } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth } from "../middlewares/auth";
 import { requireRole } from "../middlewares/roles";
@@ -87,6 +87,20 @@ partnerRouter.post(
 );
 
 partnerRouter.get(
+  "/applications",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const application = await prisma.partnerApplication.findFirst({
+      where: { applicantUserId: authUser.id },
+      include: { companion: true },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ application });
+  }),
+);
+
+partnerRouter.get(
   "/applications/me",
   requireAuth,
   asyncHandler(async (req, res) => {
@@ -105,30 +119,240 @@ partnerRouter.get(
   requireRole([Role.PARTNER, Role.ADMIN]),
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    const [companion, application] = await Promise.all([
+      prisma.companion.findFirst({ where: { userId: authUser.id } }),
+      prisma.partnerApplication.findFirst({
+        where: { applicantUserId: authUser.id },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
 
+    const isApproved = Boolean(
+      application?.status === "APPROVED" ||
+        (companion?.status === CompanionStatus.ACTIVE &&
+          companion?.verificationStatus === VerificationStatus.VERIFIED),
+    );
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+
+    let activeSessions: Array<{
+      id: string;
+      memberLabel: string;
+      type: "CHAT" | "AUDIO" | "VIDEO";
+      expectedRate: number;
+      startedAt: string | null;
+      status: SessionStatus;
+    }> = [];
+
+    let pendingRequests: Array<{
+      id: string;
+      memberLabel: string;
+      type: "CHAT" | "AUDIO" | "VIDEO";
+      expectedRate: number;
+      createdAt: string;
+    }> = [];
+
+    let stats = {
+      peopleSupportedToday: 0,
+      audioConversations: 0,
+      videoConversations: 0,
+      pendingRequests: 0,
+      earningsToday: 0,
+      averageRating: companion?.rating ?? 0,
+    };
+
+    if (companion && isApproved) {
+      const [todaySessions, liveSessions, requestSessions] = await Promise.all([
+        prisma.session.findMany({
+          where: {
+            companionId: companion.id,
+            createdAt: { gte: startOfDay, lte: endOfDay },
+          },
+          select: {
+            id: true,
+            userId: true,
+            serviceType: true,
+            companionEarning: true,
+            status: true,
+          },
+        }),
+        prisma.session.findMany({
+          where: { companionId: companion.id, status: SessionStatus.LIVE },
+          include: { user: true },
+          orderBy: { createdAt: "desc" },
+        }),
+        prisma.session.findMany({
+          where: { companionId: companion.id, status: SessionStatus.PENDING },
+          include: { user: true },
+          orderBy: { createdAt: "desc" },
+        }),
+      ]);
+
+      const supportedToday = new Set(todaySessions.map((session) => session.userId)).size;
+      const audioConversations = todaySessions.filter((session) => session.serviceType === ServiceType.AUDIO).length;
+      const videoConversations = todaySessions.filter((session) => session.serviceType === ServiceType.VIDEO).length;
+      const earningsToday = todaySessions.reduce((sum, session) => sum + Math.max(session.companionEarning, 0), 0);
+
+      stats = {
+        peopleSupportedToday: supportedToday,
+        audioConversations,
+        videoConversations,
+        pendingRequests: requestSessions.length,
+        earningsToday,
+        averageRating: companion.rating ?? 0,
+      };
+
+      activeSessions = liveSessions.map((session) => ({
+        id: session.id,
+        memberLabel: session.user.phoneNumber,
+        type: session.serviceType,
+        expectedRate:
+          session.serviceType === ServiceType.CHAT
+            ? companion.chatPrice
+            : session.serviceType === ServiceType.AUDIO
+              ? companion.audioPrice
+              : companion.videoPrice,
+        startedAt: session.startedAt ? session.startedAt.toISOString() : null,
+        status: session.status,
+      }));
+
+      pendingRequests = requestSessions.map((session) => ({
+        id: session.id,
+        memberLabel: session.user.phoneNumber,
+        type: session.serviceType,
+        expectedRate:
+          session.serviceType === ServiceType.CHAT
+            ? companion.chatPrice
+            : session.serviceType === ServiceType.AUDIO
+              ? companion.audioPrice
+              : companion.videoPrice,
+        createdAt: session.createdAt.toISOString(),
+      }));
+    }
+
+    res.json({
+      approvalState: {
+        applicationStatus: application?.status ?? "NOT_SUBMITTED",
+        kycStatus:
+          companion?.verificationStatus === VerificationStatus.VERIFIED
+            ? "VERIFIED"
+            : "PENDING",
+        companionStatus: companion?.status ?? "UNDER_REVIEW",
+        verificationStatus: companion?.verificationStatus ?? "PENDING",
+      },
+      approved: isApproved,
+      message: isApproved
+        ? "Partner dashboard ready."
+        : "Your profile is being reviewed by our safety team.",
+      companion: companion ?? null,
+      stats,
+      pendingRequests,
+      activeSessions,
+    });
+  }),
+);
+
+partnerRouter.get(
+  "/requests",
+  requireAuth,
+  requireRole([Role.PARTNER, Role.ADMIN]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
     if (!companion || companion.status !== CompanionStatus.ACTIVE) {
-      res.json({
-        status: "UNDER_REVIEW",
-        message: "Your dashboard will appear after your account is approved.",
-      });
+      res.json({ pendingRequests: [] });
       return;
     }
 
-    const [bookingsCount, sessionsCount, openSessions] = await Promise.all([
-      prisma.booking.count({ where: { companionId: companion.id } }),
-      prisma.session.count({ where: { companionId: companion.id } }),
-      prisma.session.count({ where: { companionId: companion.id, status: "LIVE" } }),
-    ]);
+    const requestSessions = await prisma.session.findMany({
+      where: { companionId: companion.id, status: SessionStatus.PENDING },
+      include: { user: true },
+      orderBy: { createdAt: "desc" },
+    });
 
     res.json({
-      companion,
-      stats: {
-        bookingsCount,
-        sessionsCount,
-        openSessions,
+      pendingRequests: requestSessions.map((session) => ({
+        id: session.id,
+        memberLabel: session.user.phoneNumber,
+        type: session.serviceType,
+        expectedRate:
+          session.serviceType === ServiceType.CHAT
+            ? companion.chatPrice
+            : session.serviceType === ServiceType.AUDIO
+              ? companion.audioPrice
+              : companion.videoPrice,
+        createdAt: session.createdAt.toISOString(),
+      })),
+    });
+  }),
+);
+
+partnerRouter.post(
+  "/requests/:id/accept",
+  requireAuth,
+  requireRole([Role.PARTNER, Role.ADMIN]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    if (!companion || companion.status !== CompanionStatus.ACTIVE) {
+      throw new HttpError(403, "Partner approval is required before accepting requests.");
+    }
+
+    const existing = await prisma.session.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing || existing.companionId !== companion.id) {
+      throw new HttpError(404, "Request not found.");
+    }
+
+    if (existing.status !== SessionStatus.PENDING) {
+      res.json({ request: existing, message: "Request is no longer pending." });
+      return;
+    }
+
+    const updated = await prisma.session.update({
+      where: { id: existing.id },
+      data: {
+        status: SessionStatus.LIVE,
+        startedAt: existing.startedAt ?? new Date(),
       },
     });
+
+    res.json({ request: updated });
+  }),
+);
+
+partnerRouter.post(
+  "/requests/:id/decline",
+  requireAuth,
+  requireRole([Role.PARTNER, Role.ADMIN]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    if (!companion || companion.status !== CompanionStatus.ACTIVE) {
+      throw new HttpError(403, "Partner approval is required before declining requests.");
+    }
+
+    const existing = await prisma.session.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing || existing.companionId !== companion.id) {
+      throw new HttpError(404, "Request not found.");
+    }
+
+    if (existing.status !== SessionStatus.PENDING) {
+      res.json({ request: existing, message: "Request is no longer pending." });
+      return;
+    }
+
+    const updated = await prisma.session.update({
+      where: { id: existing.id },
+      data: {
+        status: SessionStatus.FAILED,
+        endedAt: existing.endedAt ?? new Date(),
+      },
+    });
+
+    res.json({ request: updated });
   }),
 );
 
@@ -221,13 +445,36 @@ partnerRouter.get(
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
     if (!companion) {
-      res.json({ payouts: [] });
+      res.json({ earnings: [], payouts: [] });
       return;
     }
-    const payouts = await prisma.payout.findMany({
-      where: { companionId: companion.id },
-      orderBy: { createdAt: "desc" },
+    const [sessions, payouts] = await Promise.all([
+      prisma.session.findMany({
+        where: {
+          companionId: companion.id,
+          status: SessionStatus.COMPLETED,
+        },
+        include: { user: true },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.payout.findMany({
+        where: { companionId: companion.id },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
+
+    res.json({
+      earnings: sessions.map((session) => ({
+        id: session.id,
+        date: session.createdAt.toISOString(),
+        session: session.serviceType,
+        userMaskedPhone: session.user.phoneNumber,
+        amount: session.amount,
+        platformFee: session.platformFee,
+        netEarning: session.companionEarning,
+        status: "Credited",
+      })),
+      payouts,
     });
-    res.json({ payouts });
   }),
 );
