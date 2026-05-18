@@ -112,6 +112,10 @@ adminRouter.get(
   "/companions",
   asyncHandler(async (_req, res) => {
     const companions = await prisma.companion.findMany({
+      where: {
+        status: CompanionStatus.ACTIVE,
+        verificationStatus: VerificationStatus.VERIFIED,
+      },
       include: { user: true, sessions: true },
       orderBy: { createdAt: "desc" },
     });
@@ -258,6 +262,16 @@ adminRouter.patch(
           await tx.partnerApplication.update({
             where: { id: application.id },
             data: { companionId: createdCompanion.id },
+          });
+        }
+      } else {
+        if (application.companionId) {
+          await tx.companion.update({
+            where: { id: application.companionId },
+            data: {
+              status: CompanionStatus.UNDER_REVIEW,
+              verificationStatus: VerificationStatus.PENDING,
+            },
           });
         }
       }
