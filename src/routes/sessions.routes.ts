@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { SessionStatus, ServiceType } from "@prisma/client";
+import { CompanionStatus, ServiceType, SessionStatus, VerificationStatus } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth } from "../middlewares/auth";
 import { asyncHandler } from "../utils/asyncHandler";
@@ -28,6 +28,37 @@ sessionsRouter.get(
   }),
 );
 
+sessionsRouter.get(
+  "/:id",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const session = await prisma.session.findFirst({
+      where: {
+        id: String(req.params.id),
+        OR: [
+          { userId: authUser.id },
+          { companion: { is: { userId: authUser.id } } },
+        ],
+      },
+      include: {
+        user: true,
+        companion: true,
+        booking: true,
+      },
+    });
+
+    if (!session) throw new HttpError(404, "Session not found.");
+
+    res.json({
+      session: {
+        ...session,
+        channelName: session.sessionCode,
+      },
+    });
+  }),
+);
+
 sessionsRouter.post(
   "/",
   requireAuth,
@@ -37,6 +68,9 @@ sessionsRouter.post(
 
     const companion = await prisma.companion.findUnique({ where: { id: body.companionId } });
     if (!companion) throw new HttpError(404, "Companion not found.");
+    if (companion.status !== CompanionStatus.ACTIVE || companion.verificationStatus !== VerificationStatus.VERIFIED) {
+      throw new HttpError(403, "Companion is not available for new sessions yet.");
+    }
 
     const serviceType =
       body.serviceType === "chat"
@@ -45,6 +79,29 @@ sessionsRouter.post(
           ? ServiceType.AUDIO
           : ServiceType.VIDEO;
 
+    if (!companion.servicesOffered.includes(serviceType)) {
+      throw new HttpError(400, "This service is not offered by the selected companion.");
+    }
+
+    const existingPending = await prisma.session.findFirst({
+      where: {
+        userId: authUser.id,
+        companionId: companion.id,
+        serviceType,
+        status: SessionStatus.PENDING,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (existingPending) {
+      res.status(200).json({
+        session: {
+          ...existingPending,
+          channelName: existingPending.sessionCode,
+        },
+      });
+      return;
+    }
+
     const session = await prisma.session.create({
       data: {
         sessionCode: createCode("SES"),
@@ -52,8 +109,8 @@ sessionsRouter.post(
         userId: authUser.id,
         companionId: body.companionId,
         serviceType,
-        status: SessionStatus.LIVE,
-        startedAt: new Date(),
+        status: SessionStatus.PENDING,
+        startedAt: null,
         amount:
           serviceType === ServiceType.CHAT
             ? companion.chatPrice
@@ -62,7 +119,44 @@ sessionsRouter.post(
               : companion.videoPrice,
       },
     });
-    res.status(201).json({ session });
+    res.status(201).json({
+      session: {
+        ...session,
+        channelName: session.sessionCode,
+      },
+    });
+  }),
+);
+
+sessionsRouter.post(
+  "/:id/cancel",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const session = await prisma.session.findFirst({
+      where: { id: String(req.params.id), userId: authUser.id },
+    });
+    if (!session) throw new HttpError(404, "Session not found.");
+
+    if (session.status !== SessionStatus.PENDING && session.status !== SessionStatus.LIVE) {
+      res.json({ session, message: "Session is no longer cancellable." });
+      return;
+    }
+
+    const updated = await prisma.session.update({
+      where: { id: session.id },
+      data: {
+        status: SessionStatus.FAILED,
+        endedAt: session.endedAt ?? new Date(),
+      },
+    });
+
+    res.json({
+      session: {
+        ...updated,
+        channelName: updated.sessionCode,
+      },
+    });
   }),
 );
 

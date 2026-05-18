@@ -55,6 +55,12 @@ const partnerAvailabilitySchema = z.object({
 const MAX_CHAT_AUDIO_VIDEO_PRICE = 10000;
 const MAX_HOME_VISIT_PRICE = 100000;
 
+function maskPhoneNumber(value: string) {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length < 4) return value;
+  return `+91******${digits.slice(-4)}`;
+}
+
 const toServiceType = (value: string): ServiceType | null => {
   const normalized = value.trim().toLowerCase();
   if (normalized === "chat") return ServiceType.CHAT;
@@ -290,6 +296,14 @@ partnerRouter.get(
         (companion?.status === CompanionStatus.ACTIVE &&
           companion?.verificationStatus === VerificationStatus.VERIFIED),
     );
+    const isUnderReview = !isApproved && Boolean(
+      application?.status === "UNDER_REVIEW" ||
+        application?.status === "NEEDS_INFO" ||
+        companion?.status === CompanionStatus.UNDER_REVIEW ||
+        companion?.verificationStatus === VerificationStatus.PENDING ||
+        companion?.verificationStatus === VerificationStatus.NEEDS_REVIEW,
+    );
+    const isNotSubmitted = !application && !companion && !isApproved;
 
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
@@ -366,6 +380,8 @@ partnerRouter.get(
       activeSessions = liveSessions.map((session) => ({
         id: session.id,
         memberLabel: session.user.phoneNumber,
+        memberPhoneMasked: maskPhoneNumber(session.user.phoneNumber),
+        memberName: session.user.name ?? "Member",
         type: session.serviceType,
         expectedRate:
           session.serviceType === ServiceType.CHAT
@@ -380,6 +396,8 @@ partnerRouter.get(
       pendingRequests = requestSessions.map((session) => ({
         id: session.id,
         memberLabel: session.user.phoneNumber,
+        memberPhoneMasked: maskPhoneNumber(session.user.phoneNumber),
+        memberName: session.user.name ?? "Member",
         type: session.serviceType,
         expectedRate:
           session.serviceType === ServiceType.CHAT
@@ -401,19 +419,38 @@ partnerRouter.get(
           ? "VERIFIED"
           : "PENDING",
       approvalState: {
-        applicationStatus: application?.status ?? "NOT_SUBMITTED",
+        hasApplication: Boolean(application),
+        applicationStatus: application?.status ?? null,
         kycStatus:
           companion?.verificationStatus === VerificationStatus.VERIFIED
             ? "VERIFIED"
-            : "PENDING",
-        companionStatus: companion?.status ?? "UNDER_REVIEW",
-        verificationStatus: companion?.verificationStatus ?? "PENDING",
+            : companion?.verificationStatus === VerificationStatus.FAILED
+              ? "REJECTED"
+              : "PENDING",
+        companionStatus: companion?.status ?? null,
+        verificationStatus:
+          companion?.verificationStatus === VerificationStatus.FAILED
+            ? "REJECTED"
+            : companion?.verificationStatus ?? null,
+        approved: isApproved,
+        underReview: isUnderReview,
+        notSubmitted: isNotSubmitted,
       },
       approved: isApproved,
+      underReview: isUnderReview,
+      notSubmitted: isNotSubmitted,
       message: isApproved
         ? "Partner dashboard ready."
         : "Your profile is being reviewed by our safety team.",
-      companion: companion ?? null,
+      companion: companion
+        ? {
+            id: companion.id,
+            status: companion.status,
+            verificationStatus: companion.verificationStatus,
+            isOnline: companion.isOnline,
+          }
+        : null,
+      application: application ?? null,
       stats,
       pendingRequests,
       activeSessions,
@@ -428,7 +465,11 @@ partnerRouter.get(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
-    if (!companion || companion.status !== CompanionStatus.ACTIVE) {
+    if (
+      !companion ||
+      companion.status !== CompanionStatus.ACTIVE ||
+      companion.verificationStatus !== VerificationStatus.VERIFIED
+    ) {
       res.json({ pendingRequests: [] });
       return;
     }
@@ -463,7 +504,11 @@ partnerRouter.post(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
-    if (!companion || companion.status !== CompanionStatus.ACTIVE) {
+    if (
+      !companion ||
+      companion.status !== CompanionStatus.ACTIVE ||
+      companion.verificationStatus !== VerificationStatus.VERIFIED
+    ) {
       throw new HttpError(403, "Partner approval is required before accepting requests.");
     }
 
@@ -485,7 +530,13 @@ partnerRouter.post(
       },
     });
 
-    res.json({ request: updated });
+    res.json({
+      request: updated,
+      sessionId: updated.id,
+      type: updated.serviceType,
+      channelName: updated.sessionCode,
+      agoraToken: null,
+    });
   }),
 );
 
@@ -496,7 +547,11 @@ partnerRouter.post(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
-    if (!companion || companion.status !== CompanionStatus.ACTIVE) {
+    if (
+      !companion ||
+      companion.status !== CompanionStatus.ACTIVE ||
+      companion.verificationStatus !== VerificationStatus.VERIFIED
+    ) {
       throw new HttpError(403, "Partner approval is required before declining requests.");
     }
 
@@ -518,7 +573,11 @@ partnerRouter.post(
       },
     });
 
-    res.json({ request: updated });
+    res.json({
+      request: updated,
+      sessionId: updated.id,
+      type: updated.serviceType,
+    });
   }),
 );
 
