@@ -46,6 +46,10 @@ const onboardingSchema = z.object({
   panUrl: z.string().optional(),
 });
 
+const partnerAvailabilitySchema = z.object({
+  isOnline: z.boolean(),
+});
+
 const toServiceType = (value: string): ServiceType | null => {
   const normalized = value.trim().toLowerCase();
   if (normalized === "chat") return ServiceType.CHAT;
@@ -448,6 +452,36 @@ partnerRouter.get(
       where: { userId: authUser.id },
     });
     res.json({ companion });
+  }),
+);
+
+partnerRouter.patch(
+  "/availability",
+  requireAuth,
+  requireRole([Role.PARTNER]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const payload = partnerAvailabilitySchema.parse(req.body);
+    const companion = await prisma.companion.findFirst({
+      where: { userId: authUser.id },
+    });
+    if (
+      !companion ||
+      companion.status !== CompanionStatus.ACTIVE ||
+      companion.verificationStatus !== VerificationStatus.VERIFIED
+    ) {
+      throw new HttpError(403, "Partner approval is required before updating availability.");
+    }
+
+    const updated = await prisma.companion.update({
+      where: { id: companion.id },
+      data: { isOnline: payload.isOnline },
+    });
+
+    res.json({
+      isOnline: updated.isOnline,
+      companion: updated,
+    });
   }),
 );
 

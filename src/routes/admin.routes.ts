@@ -18,6 +18,11 @@ export const adminRouter = Router();
 
 adminRouter.use(requireAdminAccess);
 
+const DEMO_PARTNER_FIREBASE_UID = "demo-host-4455667788";
+const shouldExcludeDemoPartner =
+  process.env.NEXT_PUBLIC_CLIENT_DEMO_ENABLED !== "true" &&
+  process.env.CLIENT_DEMO_ENABLED !== "true";
+
 adminRouter.get(
   "/dashboard",
   asyncHandler(async (_req, res) => {
@@ -115,6 +120,15 @@ adminRouter.get(
       where: {
         status: CompanionStatus.ACTIVE,
         verificationStatus: VerificationStatus.VERIFIED,
+        ...(shouldExcludeDemoPartner
+          ? {
+              user: {
+                firebaseUid: {
+                  not: DEMO_PARTNER_FIREBASE_UID,
+                },
+              },
+            }
+          : {}),
       },
       include: { user: true, sessions: true },
       orderBy: { createdAt: "desc" },
