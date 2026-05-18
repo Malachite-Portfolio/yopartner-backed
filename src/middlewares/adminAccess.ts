@@ -1,7 +1,8 @@
 import type { NextFunction, Request, Response } from "express";
 import { Role } from "@prisma/client";
+import type { DecodedIdToken } from "firebase-admin/auth";
 import { env } from "../config/env";
-import { firebaseAdminAuth } from "../config/firebaseAdmin";
+import { firebaseAdminAuth, isFirebaseAdminConfigured } from "../config/firebaseAdmin";
 import { prisma } from "../db/prisma";
 import { verifyAdminJwt } from "../utils/adminJwt";
 
@@ -44,14 +45,36 @@ export const requireAdminAccess = async (req: Request, res: Response, next: Next
     // Ignore and continue to Firebase flow.
   }
 
+  if (!firebaseAdminAuth || !isFirebaseAdminConfigured()) {
+    res.status(503).json({ error: "SERVICE_UNAVAILABLE", message: "Firebase admin not configured." });
+    return;
+  }
+
+  let decoded: DecodedIdToken;
   try {
-    const decoded = await firebaseAdminAuth.verifyIdToken(token);
-    const phoneNumber = decoded.phone_number;
-    if (!phoneNumber) {
-      res.status(401).json({ error: "UNAUTHORIZED", message: "Phone number not present in token." });
+    decoded = await firebaseAdminAuth.verifyIdToken(token);
+  } catch (error) {
+    const code = typeof error === "object" && error && "code" in error ? String((error as { code?: string }).code ?? "") : "";
+    if (code === "auth/project-not-found") {
+      res.status(503).json({ error: "SERVICE_UNAVAILABLE", message: "Firebase admin not configured." });
       return;
     }
+    res.status(401).json({ error: "UNAUTHORIZED", message: "Invalid or expired token." });
+    return;
+  }
 
+  if (decoded.aud !== env.FIREBASE_ADMIN_PROJECT_ID) {
+    res.status(401).json({ error: "UNAUTHORIZED", message: "Invalid or expired token." });
+    return;
+  }
+
+  const phoneNumber = decoded.phone_number;
+  if (!phoneNumber) {
+    res.status(401).json({ error: "UNAUTHORIZED", message: "Phone number not present in token." });
+    return;
+  }
+
+  try {
     const existingUser = await prisma.user.findUnique({
       where: { firebaseUid: decoded.uid },
     });
@@ -93,7 +116,10 @@ export const requireAdminAccess = async (req: Request, res: Response, next: Next
     };
 
     next();
-  } catch {
-    res.status(401).json({ error: "UNAUTHORIZED", message: "Invalid or expired token." });
+  } catch (error) {
+    if (process.env.NODE_ENV !== "production") {
+      console.error("[adminAuth] failed to resolve admin user", error);
+    }
+    res.status(500).json({ error: "INTERNAL_SERVER_ERROR", message: "Unable to verify admin session." });
   }
 };
