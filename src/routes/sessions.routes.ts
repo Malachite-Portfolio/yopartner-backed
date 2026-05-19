@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { CompanionStatus, ServiceType, SessionStatus, VerificationStatus } from "@prisma/client";
+import { RtcRole, RtcTokenBuilder } from "agora-token";
 import { z } from "zod";
 import { requireAuth } from "../middlewares/auth";
 import { asyncHandler } from "../utils/asyncHandler";
@@ -31,8 +32,20 @@ function buildAgoraUid(sessionId: string, userId: string) {
   return hashToPositiveInt(`${sessionId}:${userId}`);
 }
 
+function buildAgoraUidForActor(sessionId: string, authUserId: string, companionOwnerUserId: string | null, requestUserId: string) {
+  const actorScope = authUserId === requestUserId ? "member" : authUserId === companionOwnerUserId ? "partner" : "actor";
+  const hash = hashToPositiveInt(`${sessionId}:${authUserId}:${actorScope}`) % 90000000;
+  if (actorScope === "member") return 100000000 + hash;
+  if (actorScope === "partner") return 200000000 + hash;
+  return 300000000 + hash;
+}
+
 function buildChannelName(sessionId: string) {
   return `session-${sessionId}`;
+}
+
+function isSessionTerminal(status: SessionStatus) {
+  return status === SessionStatus.COMPLETED || status === SessionStatus.FAILED || status === SessionStatus.FLAGGED;
 }
 
 function toSessionResponse(session: {
@@ -123,12 +136,28 @@ sessionsRouter.get(
     if (session.serviceType === ServiceType.CHAT) {
       throw new HttpError(400, "Agora token is only available for audio/video sessions.");
     }
+    if (!env.NEXT_PUBLIC_AGORA_APP_ID || !env.AGORA_APP_CERTIFICATE) {
+      throw new HttpError(503, "Calling is not configured on server. Missing Agora credentials.");
+    }
+
+    const uid = buildAgoraUidForActor(session.id, authUser.id, session.companion?.userId ?? null, session.userId);
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      env.NEXT_PUBLIC_AGORA_APP_ID,
+      env.AGORA_APP_CERTIFICATE,
+      buildChannelName(session.id),
+      uid,
+      RtcRole.PUBLISHER,
+      expiresAt,
+      expiresAt,
+    );
 
     res.json({
-      appId: env.NEXT_PUBLIC_AGORA_APP_ID ?? "",
-      token: null,
+      appId: env.NEXT_PUBLIC_AGORA_APP_ID,
+      token,
       channelName: buildChannelName(session.id),
-      uid: buildAgoraUid(session.id, authUser.id),
+      uid,
+      expiresAt,
     });
   }),
 );
@@ -278,12 +307,10 @@ sessionsRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const session = await prisma.session.findFirst({
-      where: { id: String(req.params.id), userId: authUser.id },
-    });
+    const session = await findSessionForActor(String(req.params.id), authUser.id);
     if (!session) throw new HttpError(404, "Session not found.");
 
-    if (session.status !== SessionStatus.PENDING && session.status !== SessionStatus.LIVE) {
+    if (isSessionTerminal(session.status)) {
       res.json({ session: toSessionResponse(session, authUser.id), message: "Session is no longer cancellable." });
       return;
     }
@@ -302,37 +329,39 @@ sessionsRouter.post(
   }),
 );
 
-sessionsRouter.patch(
-  "/:id/end",
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const authUser = req.authUser!;
-    const session = await prisma.session.findFirst({
-      where: { id: String(req.params.id), userId: authUser.id },
-    });
-    if (!session) throw new HttpError(404, "Session not found.");
+const endSessionHandler = asyncHandler(async (req, res) => {
+  const authUser = req.authUser!;
+  const session = await findSessionForActor(String(req.params.id), authUser.id);
+  if (!session) throw new HttpError(404, "Session not found.");
 
-    const now = new Date();
-    const durationSeconds = session.startedAt
-      ? Math.max(1, Math.floor((now.getTime() - session.startedAt.getTime()) / 1000))
-      : session.durationSeconds;
-    const companionEarning = Math.max(0, Math.floor(session.amount * 0.8));
-    const platformFee = session.amount - companionEarning;
+  if (isSessionTerminal(session.status)) {
+    res.json({ session: toSessionResponse(session, authUser.id), message: "Session already ended." });
+    return;
+  }
 
-    const updated = await prisma.session.update({
-      where: { id: session.id },
-      data: {
-        status: SessionStatus.COMPLETED,
-        endedAt: now,
-        durationSeconds,
-        companionEarning,
-        platformFee,
-      },
-    });
+  const now = new Date();
+  const durationSeconds = session.startedAt
+    ? Math.max(1, Math.floor((now.getTime() - session.startedAt.getTime()) / 1000))
+    : session.durationSeconds;
+  const companionEarning = Math.max(0, Math.floor(session.amount * 0.8));
+  const platformFee = session.amount - companionEarning;
 
-    res.json({ session: toSessionResponse(updated, authUser.id) });
-  }),
-);
+  const updated = await prisma.session.update({
+    where: { id: session.id },
+    data: {
+      status: SessionStatus.COMPLETED,
+      endedAt: now,
+      durationSeconds,
+      companionEarning,
+      platformFee,
+    },
+  });
+
+  res.json({ session: toSessionResponse(updated, authUser.id) });
+});
+
+sessionsRouter.post("/:id/end", requireAuth, endSessionHandler);
+sessionsRouter.patch("/:id/end", requireAuth, endSessionHandler);
 
 sessionsRouter.patch(
   "/:id/flag",

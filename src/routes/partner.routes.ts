@@ -54,6 +54,7 @@ const partnerAvailabilitySchema = z.object({
 
 const MAX_CHAT_AUDIO_VIDEO_PRICE = 10000;
 const MAX_HOME_VISIT_PRICE = 100000;
+const STALE_LIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 
 function maskPhoneNumber(value: string) {
   const digits = value.replace(/\D/g, "");
@@ -353,6 +354,19 @@ partnerRouter.get(
     };
 
     if (companion && isApproved) {
+      const staleThreshold = new Date(Date.now() - STALE_LIVE_SESSION_MS);
+      await prisma.session.updateMany({
+        where: {
+          companionId: companion.id,
+          status: SessionStatus.LIVE,
+          updatedAt: { lt: staleThreshold },
+        },
+        data: {
+          status: SessionStatus.COMPLETED,
+          endedAt: new Date(),
+        },
+      });
+
       const [todaySessions, liveSessions, requestSessions] = await Promise.all([
         prisma.session.findMany({
           where: {
@@ -368,9 +382,14 @@ partnerRouter.get(
           },
         }),
         prisma.session.findMany({
-          where: { companionId: companion.id, status: SessionStatus.LIVE },
+          where: {
+            companionId: companion.id,
+            status: SessionStatus.LIVE,
+            updatedAt: { gte: staleThreshold },
+          },
           include: { user: true },
           orderBy: { createdAt: "desc" },
+          take: 10,
         }),
         prisma.session.findMany({
           where: { companionId: companion.id, status: SessionStatus.PENDING },
