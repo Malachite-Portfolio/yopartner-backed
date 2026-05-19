@@ -61,6 +61,22 @@ function maskPhoneNumber(value: string) {
   return `+91******${digits.slice(-4)}`;
 }
 
+function hashToPositiveInt(input: string) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
+  }
+  return (hash % 2147483640) + 1;
+}
+
+function buildAgoraUid(sessionId: string, userId: string) {
+  return hashToPositiveInt(`${sessionId}:${userId}`);
+}
+
+function buildChannelName(sessionId: string) {
+  return `session-${sessionId}`;
+}
+
 const toServiceType = (value: string): ServiceType | null => {
   const normalized = value.trim().toLowerCase();
   if (normalized === "chat") return ServiceType.CHAT;
@@ -484,6 +500,8 @@ partnerRouter.get(
       pendingRequests: requestSessions.map((session) => ({
         id: session.id,
         memberLabel: session.user.phoneNumber,
+        memberPhoneMasked: maskPhoneNumber(session.user.phoneNumber),
+        memberName: session.user.name ?? "Member",
         type: session.serviceType,
         expectedRate:
           session.serviceType === ServiceType.CHAT
@@ -534,8 +552,9 @@ partnerRouter.post(
       request: updated,
       sessionId: updated.id,
       type: updated.serviceType,
-      channelName: updated.sessionCode,
+      channelName: buildChannelName(updated.id),
       agoraToken: null,
+      agoraUid: buildAgoraUid(updated.id, authUser.id),
     });
   }),
 );

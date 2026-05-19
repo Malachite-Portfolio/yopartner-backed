@@ -5,6 +5,7 @@ import { requireAuth } from "../middlewares/auth";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { createCode, HttpError } from "../utils/http";
+import { env } from "../config/env";
 
 const createSessionSchema = z.object({
   bookingId: z.string().optional(),
@@ -12,7 +13,75 @@ const createSessionSchema = z.object({
   serviceType: z.enum(["chat", "audio", "video"]),
 });
 
+const sendMessageSchema = z.object({
+  body: z.string().trim().min(1).max(1000),
+});
+
 export const sessionsRouter = Router();
+
+function hashToPositiveInt(input: string) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
+  }
+  return (hash % 2147483640) + 1;
+}
+
+function buildAgoraUid(sessionId: string, userId: string) {
+  return hashToPositiveInt(`${sessionId}:${userId}`);
+}
+
+function buildChannelName(sessionId: string) {
+  return `session-${sessionId}`;
+}
+
+function toSessionResponse(session: {
+  id: string;
+  sessionCode: string;
+  bookingId: string | null;
+  userId: string;
+  companionId: string;
+  serviceType: ServiceType;
+  status: SessionStatus;
+  startedAt: Date | null;
+  endedAt: Date | null;
+  durationSeconds: number;
+  amount: number;
+  platformFee: number;
+  companionEarning: number;
+  safetyFlag: boolean;
+  safetyNote: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  user?: unknown;
+  companion?: unknown;
+  booking?: unknown;
+}, authUserId: string) {
+  return {
+    ...session,
+    type: session.serviceType,
+    channelName: buildChannelName(session.id),
+    agoraToken: null,
+    agoraUid: buildAgoraUid(session.id, authUserId),
+  };
+}
+
+async function findSessionForActor(sessionId: string, authUserId: string) {
+  return prisma.session.findFirst({
+    where: {
+      id: sessionId,
+      OR: [
+        { userId: authUserId },
+        { companion: { is: { userId: authUserId } } },
+      ],
+    },
+    include: {
+      user: true,
+      companion: true,
+      booking: true,
+    },
+  });
+}
 
 sessionsRouter.get(
   "/",
@@ -24,7 +93,9 @@ sessionsRouter.get(
       include: { companion: true, booking: true },
       orderBy: { createdAt: "desc" },
     });
-    res.json({ sessions });
+    res.json({
+      sessions: sessions.map((session) => toSessionResponse(session, authUser.id)),
+    });
   }),
 );
 
@@ -33,27 +104,107 @@ sessionsRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const session = await prisma.session.findFirst({
-      where: {
-        id: String(req.params.id),
-        OR: [
-          { userId: authUser.id },
-          { companion: { is: { userId: authUser.id } } },
-        ],
-      },
-      include: {
-        user: true,
-        companion: true,
-        booking: true,
-      },
-    });
-
+    const session = await findSessionForActor(String(req.params.id), authUser.id);
     if (!session) throw new HttpError(404, "Session not found.");
 
     res.json({
-      session: {
-        ...session,
-        channelName: session.sessionCode,
+      session: toSessionResponse(session, authUser.id),
+    });
+  }),
+);
+
+sessionsRouter.get(
+  "/:id/agora-token",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const session = await findSessionForActor(String(req.params.id), authUser.id);
+    if (!session) throw new HttpError(404, "Session not found.");
+    if (session.serviceType === ServiceType.CHAT) {
+      throw new HttpError(400, "Agora token is only available for audio/video sessions.");
+    }
+
+    res.json({
+      appId: env.NEXT_PUBLIC_AGORA_APP_ID ?? "",
+      token: null,
+      channelName: buildChannelName(session.id),
+      uid: buildAgoraUid(session.id, authUser.id),
+    });
+  }),
+);
+
+sessionsRouter.get(
+  "/:id/messages",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const session = await findSessionForActor(String(req.params.id), authUser.id);
+    if (!session) throw new HttpError(404, "Session not found.");
+
+    const messages = await prisma.chatMessage.findMany({
+      where: { sessionId: session.id },
+      include: {
+        senderUser: {
+          select: {
+            id: true,
+            phoneNumber: true,
+            name: true,
+          },
+        },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    res.json({
+      messages: messages.map((message) => ({
+        id: message.id,
+        sessionId: message.sessionId,
+        senderUserId: message.senderUserId,
+        body: message.body,
+        createdAt: message.createdAt.toISOString(),
+        senderUser: message.senderUser,
+      })),
+    });
+  }),
+);
+
+sessionsRouter.post(
+  "/:id/messages",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const session = await findSessionForActor(String(req.params.id), authUser.id);
+    if (!session) throw new HttpError(404, "Session not found.");
+    if (session.status !== SessionStatus.LIVE) {
+      throw new HttpError(400, "Messages can only be sent in active sessions.");
+    }
+
+    const payload = sendMessageSchema.parse(req.body);
+    const created = await prisma.chatMessage.create({
+      data: {
+        sessionId: session.id,
+        senderUserId: authUser.id,
+        body: payload.body,
+      },
+      include: {
+        senderUser: {
+          select: {
+            id: true,
+            phoneNumber: true,
+            name: true,
+          },
+        },
+      },
+    });
+
+    res.status(201).json({
+      message: {
+        id: created.id,
+        sessionId: created.sessionId,
+        senderUserId: created.senderUserId,
+        body: created.body,
+        createdAt: created.createdAt.toISOString(),
+        senderUser: created.senderUser,
       },
     });
   }),
@@ -94,10 +245,7 @@ sessionsRouter.post(
     });
     if (existingPending) {
       res.status(200).json({
-        session: {
-          ...existingPending,
-          channelName: existingPending.sessionCode,
-        },
+        session: toSessionResponse(existingPending, authUser.id),
       });
       return;
     }
@@ -120,10 +268,7 @@ sessionsRouter.post(
       },
     });
     res.status(201).json({
-      session: {
-        ...session,
-        channelName: session.sessionCode,
-      },
+      session: toSessionResponse(session, authUser.id),
     });
   }),
 );
@@ -139,7 +284,7 @@ sessionsRouter.post(
     if (!session) throw new HttpError(404, "Session not found.");
 
     if (session.status !== SessionStatus.PENDING && session.status !== SessionStatus.LIVE) {
-      res.json({ session, message: "Session is no longer cancellable." });
+      res.json({ session: toSessionResponse(session, authUser.id), message: "Session is no longer cancellable." });
       return;
     }
 
@@ -152,10 +297,7 @@ sessionsRouter.post(
     });
 
     res.json({
-      session: {
-        ...updated,
-        channelName: updated.sessionCode,
-      },
+      session: toSessionResponse(updated, authUser.id),
     });
   }),
 );
@@ -188,7 +330,7 @@ sessionsRouter.patch(
       },
     });
 
-    res.json({ session: updated });
+    res.json({ session: toSessionResponse(updated, authUser.id) });
   }),
 );
 
@@ -210,6 +352,6 @@ sessionsRouter.patch(
         safetyNote: note,
       },
     });
-    res.json({ session: updated });
+    res.json({ session: toSessionResponse(updated, authUser.id) });
   }),
 );

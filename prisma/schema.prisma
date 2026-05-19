@@ -88,6 +88,7 @@ model User {
   walletAccount  WalletAccount?
   bookings       Booking[]
   sessions       Session[]         @relation("UserSessions")
+  sentMessages   ChatMessage[]     @relation("ChatMessageSender")
   reviews        Review[]          @relation("UserReviews")
   supportTickets SupportTicket[]
 }
@@ -203,8 +204,21 @@ model Session {
   companionEarning Int           @default(0)
   safetyFlag       Boolean       @default(false)
   safetyNote       String?
+  messages         ChatMessage[]
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
+}
+
+model ChatMessage {
+  id           String   @id @default(cuid())
+  sessionId    String
+  session      Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  senderUserId String
+  senderUser   User     @relation("ChatMessageSender", fields: [senderUserId], references: [id], onDelete: Cascade)
+  body         String
+  createdAt    DateTime @default(now())
+
+  @@index([sessionId, createdAt])
 }
 
 model WalletAccount {
