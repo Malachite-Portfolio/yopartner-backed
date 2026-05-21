@@ -62,6 +62,42 @@ function maskPhoneNumber(value: string) {
   return `+91******${digits.slice(-4)}`;
 }
 
+function toMessageResponse(
+  message: {
+    id: string;
+    sessionId: string;
+    senderUserId: string;
+    body: string;
+    createdAt: Date;
+    senderUser?: unknown;
+  },
+  session: {
+    userId: string;
+    companion?: { userId: string } | null;
+  },
+  authUserId: string,
+) {
+  const senderRole =
+    message.senderUserId === session.userId
+      ? "USER"
+      : message.senderUserId === session.companion?.userId
+        ? "PARTNER"
+        : "UNKNOWN";
+
+  return {
+    id: message.id,
+    sessionId: message.sessionId,
+    senderId: message.senderUserId,
+    senderUserId: message.senderUserId,
+    senderRole,
+    text: message.body,
+    body: message.body,
+    createdAt: message.createdAt.toISOString(),
+    isMine: message.senderUserId === authUserId,
+    senderUser: message.senderUser,
+  };
+}
+
 function toSessionResponse(session: {
   id: string;
   sessionCode: string;
@@ -236,14 +272,7 @@ sessionsRouter.get(
     });
 
     res.json({
-      messages: messages.map((message) => ({
-        id: message.id,
-        sessionId: message.sessionId,
-        senderUserId: message.senderUserId,
-        body: message.body,
-        createdAt: message.createdAt.toISOString(),
-        senderUser: message.senderUser,
-      })),
+      messages: messages.map((message) => toMessageResponse(message, session, authUser.id)),
     });
   }),
 );
@@ -278,14 +307,7 @@ sessionsRouter.post(
     });
 
     res.status(201).json({
-      message: {
-        id: created.id,
-        sessionId: created.sessionId,
-        senderUserId: created.senderUserId,
-        body: created.body,
-        createdAt: created.createdAt.toISOString(),
-        senderUser: created.senderUser,
-      },
+      message: toMessageResponse(created, session, authUser.id),
     });
   }),
 );
