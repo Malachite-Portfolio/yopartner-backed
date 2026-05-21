@@ -41,7 +41,13 @@ enum BookingStatus {
 
 enum SessionStatus {
   PENDING
+  ACCEPTED
   LIVE
+  DECLINED
+  CANCELLED
+  ENDED
+  EXPIRED
+  // Legacy/backward-compatible values
   COMPLETED
   FAILED
   FLAGGED
@@ -196,8 +202,11 @@ model Session {
   companion        Companion     @relation("CompanionSessions", fields: [companionId], references: [id], onDelete: Cascade)
   serviceType      ServiceType
   status           SessionStatus @default(PENDING)
+  acceptedAt       DateTime?
   startedAt        DateTime?
   endedAt          DateTime?
+  endedByUserId    String?
+  lastHeartbeatAt  DateTime?
   durationSeconds  Int           @default(0)
   amount           Int           @default(0)
   platformFee      Int           @default(0)

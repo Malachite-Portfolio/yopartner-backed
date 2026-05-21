@@ -55,23 +55,12 @@ const partnerAvailabilitySchema = z.object({
 const MAX_CHAT_AUDIO_VIDEO_PRICE = 10000;
 const MAX_HOME_VISIT_PRICE = 100000;
 const STALE_LIVE_SESSION_MS = 2 * 60 * 60 * 1000;
+const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.LIVE, SessionStatus.ACCEPTED];
 
 function maskPhoneNumber(value: string) {
   const digits = value.replace(/\D/g, "");
   if (digits.length < 4) return value;
   return `+91******${digits.slice(-4)}`;
-}
-
-function hashToPositiveInt(input: string) {
-  let hash = 0;
-  for (let i = 0; i < input.length; i += 1) {
-    hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
-  }
-  return (hash % 2147483640) + 1;
-}
-
-function buildAgoraUid(sessionId: string, userId: string) {
-  return hashToPositiveInt(`${sessionId}:${userId}`);
 }
 
 function buildChannelName(sessionId: string) {
@@ -358,11 +347,12 @@ partnerRouter.get(
       await prisma.session.updateMany({
         where: {
           companionId: companion.id,
-          status: SessionStatus.LIVE,
+          status: { in: ACTIVE_SESSION_STATUSES },
+          endedAt: null,
           updatedAt: { lt: staleThreshold },
         },
         data: {
-          status: SessionStatus.COMPLETED,
+          status: SessionStatus.EXPIRED,
           endedAt: new Date(),
         },
       });
@@ -384,7 +374,8 @@ partnerRouter.get(
         prisma.session.findMany({
           where: {
             companionId: companion.id,
-            status: SessionStatus.LIVE,
+            status: { in: ACTIVE_SESSION_STATUSES },
+            endedAt: null,
             updatedAt: { gte: staleThreshold },
           },
           include: { user: true },
@@ -412,21 +403,28 @@ partnerRouter.get(
         averageRating: companion.rating ?? 0,
       };
 
-      activeSessions = liveSessions.map((session) => ({
-        id: session.id,
-        memberLabel: session.user.phoneNumber,
-        memberPhoneMasked: maskPhoneNumber(session.user.phoneNumber),
-        memberName: session.user.name ?? "Member",
-        type: session.serviceType,
-        expectedRate:
-          session.serviceType === ServiceType.CHAT
-            ? companion.chatPrice
-            : session.serviceType === ServiceType.AUDIO
-              ? companion.audioPrice
-              : companion.videoPrice,
-        startedAt: session.startedAt ? session.startedAt.toISOString() : null,
-        status: session.status,
-      }));
+      activeSessions = Array.from(
+        new Map(
+          liveSessions.map((session) => [
+            session.id,
+            {
+              id: session.id,
+              memberLabel: session.user.phoneNumber,
+              memberPhoneMasked: maskPhoneNumber(session.user.phoneNumber),
+              memberName: session.user.name ?? "Member",
+              type: session.serviceType,
+              expectedRate:
+                session.serviceType === ServiceType.CHAT
+                  ? companion.chatPrice
+                  : session.serviceType === ServiceType.AUDIO
+                    ? companion.audioPrice
+                    : companion.videoPrice,
+              startedAt: session.startedAt ? session.startedAt.toISOString() : null,
+              status: session.status,
+            },
+          ]),
+        ).values(),
+      );
 
       pendingRequests = requestSessions.map((session) => ({
         id: session.id,
@@ -555,25 +553,46 @@ partnerRouter.post(
     }
 
     if (existing.status !== SessionStatus.PENDING) {
-      res.json({ request: existing, message: "Request is no longer pending." });
+      res.json({
+        session: {
+          id: existing.id,
+          type: existing.serviceType,
+          status: existing.status,
+          channelName: buildChannelName(existing.id),
+          acceptedAt: existing.acceptedAt,
+          startedAt: existing.startedAt,
+          endedAt: existing.endedAt,
+          userId: existing.userId,
+          companionId: existing.companionId,
+        },
+        message: "Request is no longer pending.",
+      });
       return;
     }
 
+    const now = new Date();
     const updated = await prisma.session.update({
       where: { id: existing.id },
       data: {
         status: SessionStatus.LIVE,
-        startedAt: existing.startedAt ?? new Date(),
+        acceptedAt: existing.acceptedAt ?? now,
+        startedAt: existing.startedAt ?? existing.acceptedAt ?? now,
+        lastHeartbeatAt: now,
       },
     });
 
     res.json({
-      request: updated,
-      sessionId: updated.id,
-      type: updated.serviceType,
-      channelName: buildChannelName(updated.id),
-      agoraToken: null,
-      agoraUid: buildAgoraUid(updated.id, authUser.id),
+      session: {
+        id: updated.id,
+        type: updated.serviceType,
+        status: updated.status,
+        channelName: buildChannelName(updated.id),
+        acceptedAt: updated.acceptedAt,
+        startedAt: updated.startedAt,
+        endedAt: updated.endedAt,
+        userId: updated.userId,
+        companionId: updated.companionId,
+      },
     });
   }),
 );
@@ -606,8 +625,9 @@ partnerRouter.post(
     const updated = await prisma.session.update({
       where: { id: existing.id },
       data: {
-        status: SessionStatus.FAILED,
+        status: SessionStatus.DECLINED,
         endedAt: existing.endedAt ?? new Date(),
+        endedByUserId: authUser.id,
       },
     });
 
@@ -744,7 +764,7 @@ partnerRouter.get(
       prisma.session.findMany({
         where: {
           companionId: companion.id,
-          status: SessionStatus.COMPLETED,
+          status: SessionStatus.ENDED,
         },
         include: { user: true },
         orderBy: { createdAt: "desc" },

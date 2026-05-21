@@ -45,7 +45,21 @@ function buildChannelName(sessionId: string) {
 }
 
 function isSessionTerminal(status: SessionStatus) {
-  return status === SessionStatus.COMPLETED || status === SessionStatus.FAILED || status === SessionStatus.FLAGGED;
+  return (
+    status === SessionStatus.DECLINED ||
+    status === SessionStatus.CANCELLED ||
+    status === SessionStatus.ENDED ||
+    status === SessionStatus.EXPIRED ||
+    status === SessionStatus.COMPLETED ||
+    status === SessionStatus.FAILED ||
+    status === SessionStatus.FLAGGED
+  );
+}
+
+function maskPhoneNumber(value: string) {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length < 4) return value;
+  return `+91******${digits.slice(-4)}`;
 }
 
 function toSessionResponse(session: {
@@ -56,8 +70,11 @@ function toSessionResponse(session: {
   companionId: string;
   serviceType: ServiceType;
   status: SessionStatus;
+  acceptedAt: Date | null;
   startedAt: Date | null;
   endedAt: Date | null;
+  endedByUserId: string | null;
+  lastHeartbeatAt: Date | null;
   durationSeconds: number;
   amount: number;
   platformFee: number;
@@ -71,9 +88,43 @@ function toSessionResponse(session: {
   booking?: unknown;
 }, authUserId: string) {
   return {
-    ...session,
+    id: session.id,
+    sessionCode: session.sessionCode,
+    bookingId: session.bookingId,
+    userId: session.userId,
+    companionId: session.companionId,
+    serviceType: session.serviceType,
     type: session.serviceType,
+    status: session.status,
     channelName: buildChannelName(session.id),
+    acceptedAt: session.acceptedAt,
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    endedByUserId: session.endedByUserId,
+    lastHeartbeatAt: session.lastHeartbeatAt,
+    durationSeconds: session.durationSeconds,
+    amount: session.amount,
+    platformFee: session.platformFee,
+    companionEarning: session.companionEarning,
+    safetyFlag: session.safetyFlag,
+    safetyNote: session.safetyNote,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    user: session.user
+      ? {
+          id: (session.user as { id: string }).id,
+          name: (session.user as { name?: string | null }).name ?? "Member",
+          phoneMasked: maskPhoneNumber((session.user as { phoneNumber: string }).phoneNumber),
+        }
+      : null,
+    companion: session.companion
+      ? {
+          id: (session.companion as { id: string }).id,
+          name:
+            (session.companion as { displayName?: string | null }).displayName ??
+            "Companion",
+        }
+      : null,
     agoraToken: null,
     agoraUid: buildAgoraUid(session.id, authUserId),
   };
@@ -287,7 +338,11 @@ sessionsRouter.post(
         companionId: body.companionId,
         serviceType,
         status: SessionStatus.PENDING,
+        acceptedAt: null,
         startedAt: null,
+        endedAt: null,
+        endedByUserId: null,
+        lastHeartbeatAt: new Date(),
         amount:
           serviceType === ServiceType.CHAT
             ? companion.chatPrice
@@ -318,8 +373,9 @@ sessionsRouter.post(
     const updated = await prisma.session.update({
       where: { id: session.id },
       data: {
-        status: SessionStatus.FAILED,
+        status: SessionStatus.CANCELLED,
         endedAt: session.endedAt ?? new Date(),
+        endedByUserId: authUser.id,
       },
     });
 
@@ -349,8 +405,9 @@ const endSessionHandler = asyncHandler(async (req, res) => {
   const updated = await prisma.session.update({
     where: { id: session.id },
     data: {
-      status: SessionStatus.COMPLETED,
+      status: SessionStatus.ENDED,
       endedAt: now,
+      endedByUserId: authUser.id,
       durationSeconds,
       companionEarning,
       platformFee,
@@ -376,9 +433,11 @@ sessionsRouter.patch(
     const updated = await prisma.session.update({
       where: { id: session.id },
       data: {
-        status: SessionStatus.FLAGGED,
+        status: SessionStatus.ENDED,
         safetyFlag: true,
         safetyNote: note,
+        endedAt: session.endedAt ?? new Date(),
+        endedByUserId: authUser.id,
       },
     });
     res.json({ session: toSessionResponse(updated, authUser.id) });
