@@ -684,7 +684,13 @@ partnerRouter.get(
     const companion = await prisma.companion.findFirst({
       where: { userId: authUser.id },
     });
-    res.json({ companion });
+    const application = await prisma.partnerApplication.findFirst({
+      where: {
+        applicantUserId: authUser.id,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ companion, application });
   }),
 );
 
@@ -766,6 +772,19 @@ partnerRouter.get(
       throw new HttpError(404, "Companion profile not found.");
     }
 
+    const latestApplicationWithSelfie = await prisma.partnerApplication.findFirst({
+      where: {
+        applicantUserId: authUser.id,
+        selfieUrl: { not: null },
+      },
+      orderBy: { createdAt: "desc" },
+      select: {
+        selfieUrl: true,
+      },
+    });
+
+    const resolvedProfileImageUrl = companion.profileImageUrl ?? latestApplicationWithSelfie?.selfieUrl ?? null;
+
     const galleryItems = companion.galleryImageUrls.map((imageUrl, index) => ({
       imageUrl,
       storagePath: companion.galleryImageStoragePaths[index] ?? "",
@@ -774,6 +793,7 @@ partnerRouter.get(
     res.json({
       profileImageUrl: companion.profileImageUrl,
       profileImageStoragePath: companion.profileImageStoragePath,
+      resolvedProfileImageUrl,
       galleryImages: galleryItems,
     });
   }),

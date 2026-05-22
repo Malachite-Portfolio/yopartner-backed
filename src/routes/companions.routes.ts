@@ -59,17 +59,28 @@ companionsRouter.get(
           : {}),
       },
       orderBy: [{ isOnline: "desc" }, { rating: "desc" }],
+      include: {
+        partnerApplications: {
+          where: { selfieUrl: { not: null } },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { selfieUrl: true },
+        },
+      },
     });
 
     const busySet = await getBusyCompanionIds(companions.map((companion) => companion.id));
     res.json({
       companions: companions.map((companion) => {
+        const { partnerApplications, ...companionData } = companion;
         const isBusy = busySet.has(companion.id);
         const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+        const resolvedProfileImageUrl = companion.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
         return {
-          ...companion,
-          image: companion.profileImageUrl ?? null,
-          galleryImages: companion.galleryImageUrls,
+          ...companionData,
+          image: resolvedProfileImageUrl,
+          galleryImages: companionData.galleryImageUrls,
+          resolvedProfileImageUrl,
           isBusy,
           effectiveStatus,
         };
@@ -85,16 +96,27 @@ companionsRouter.get(
       where: { status: CompanionStatus.ACTIVE },
       orderBy: [{ rating: "desc" }],
       take: 12,
+      include: {
+        partnerApplications: {
+          where: { selfieUrl: { not: null } },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { selfieUrl: true },
+        },
+      },
     });
     const busySet = await getBusyCompanionIds(companions.map((companion) => companion.id));
     res.json({
       companions: companions.map((companion) => {
+        const { partnerApplications, ...companionData } = companion;
         const isBusy = busySet.has(companion.id);
         const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+        const resolvedProfileImageUrl = companion.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
         return {
-          ...companion,
-          image: companion.profileImageUrl ?? null,
-          galleryImages: companion.galleryImageUrls,
+          ...companionData,
+          image: resolvedProfileImageUrl,
+          galleryImages: companionData.galleryImageUrls,
+          resolvedProfileImageUrl,
           isBusy,
           effectiveStatus,
         };
@@ -108,6 +130,14 @@ companionsRouter.get(
   asyncHandler(async (req, res) => {
     const companion = await prisma.companion.findUnique({
       where: { id: String(req.params.id) },
+      include: {
+        partnerApplications: {
+          where: { selfieUrl: { not: null } },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { selfieUrl: true },
+        },
+      },
     });
     if (!companion || companion.status !== CompanionStatus.ACTIVE) {
       res.status(404).json({ error: "NOT_FOUND", message: "Companion not found." });
@@ -138,11 +168,14 @@ companionsRouter.get(
     });
     const isBusy = Boolean(active);
     const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+    const { partnerApplications, ...companionData } = companion;
+    const resolvedProfileImageUrl = companionData.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
     res.json({
       companion: {
-        ...companion,
-        image: companion.profileImageUrl ?? null,
-        galleryImages: companion.galleryImageUrls,
+        ...companionData,
+        image: resolvedProfileImageUrl,
+        galleryImages: companionData.galleryImageUrls,
+        resolvedProfileImageUrl,
         isBusy,
         effectiveStatus,
       },
