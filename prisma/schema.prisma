@@ -204,6 +204,9 @@ model Session {
   status           SessionStatus @default(PENDING)
   acceptedAt       DateTime?
   startedAt        DateTime?
+  liveStartedAt    DateTime?
+  userMediaReadyAt DateTime?
+  partnerMediaReadyAt DateTime?
   endedAt          DateTime?
   endedByUserId    String?
   lastHeartbeatAt  DateTime?

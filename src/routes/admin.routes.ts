@@ -15,6 +15,8 @@ import { prisma } from "../db/prisma";
 import { createCode, HttpError } from "../utils/http";
 
 export const adminRouter = Router();
+const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
+const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 
 adminRouter.use(requireAdminAccess);
 
@@ -133,7 +135,46 @@ adminRouter.get(
       include: { user: true, sessions: true },
       orderBy: { createdAt: "desc" },
     });
-    res.json({ companions });
+    const companionIds = companions.map((companion) => companion.id);
+    const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
+    if (companionIds.length > 0) {
+      await prisma.session.updateMany({
+        where: {
+          companionId: { in: companionIds },
+          status: { in: ACTIVE_SESSION_STATUSES },
+          endedAt: null,
+          updatedAt: { lt: staleThreshold },
+        },
+        data: {
+          status: SessionStatus.EXPIRED,
+          endedAt: new Date(),
+        },
+      });
+    }
+    const busySessions = companionIds.length
+      ? await prisma.session.findMany({
+          where: {
+            companionId: { in: companionIds },
+            status: { in: ACTIVE_SESSION_STATUSES },
+            endedAt: null,
+            updatedAt: { gte: staleThreshold },
+          },
+          select: { companionId: true },
+        })
+      : [];
+    const busySet = new Set(busySessions.map((session) => session.companionId));
+
+    res.json({
+      companions: companions.map((companion) => {
+        const isBusy = busySet.has(companion.id);
+        const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+        return {
+          ...companion,
+          isBusy,
+          effectiveStatus,
+        };
+      }),
+    });
   }),
 );
 

@@ -18,7 +18,13 @@ const sendMessageSchema = z.object({
   body: z.string().trim().min(1).max(1000),
 });
 
+const markLiveSchema = z.object({
+  mediaReady: z.boolean().optional(),
+});
+
 export const sessionsRouter = Router();
+const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
+const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 
 function hashToPositiveInt(input: string) {
   let hash = 0;
@@ -108,6 +114,9 @@ function toSessionResponse(session: {
   status: SessionStatus;
   acceptedAt: Date | null;
   startedAt: Date | null;
+  liveStartedAt: Date | null;
+  userMediaReadyAt: Date | null;
+  partnerMediaReadyAt: Date | null;
   endedAt: Date | null;
   endedByUserId: string | null;
   lastHeartbeatAt: Date | null;
@@ -135,6 +144,9 @@ function toSessionResponse(session: {
     channelName: buildChannelName(session.id),
     acceptedAt: session.acceptedAt,
     startedAt: session.startedAt,
+    liveStartedAt: session.liveStartedAt,
+    userMediaReadyAt: session.userMediaReadyAt,
+    partnerMediaReadyAt: session.partnerMediaReadyAt,
     endedAt: session.endedAt,
     endedByUserId: session.endedByUserId,
     lastHeartbeatAt: session.lastHeartbeatAt,
@@ -352,6 +364,51 @@ sessionsRouter.post(
       return;
     }
 
+    const existingActiveForUser = await prisma.session.findFirst({
+      where: {
+        userId: authUser.id,
+        companionId: companion.id,
+        serviceType,
+        status: { in: ACTIVE_SESSION_STATUSES },
+        endedAt: null,
+      },
+      orderBy: { createdAt: "desc" },
+      include: { user: true, companion: true, booking: true },
+    });
+    if (existingActiveForUser) {
+      res.status(200).json({
+        session: toSessionResponse(existingActiveForUser, authUser.id),
+      });
+      return;
+    }
+
+    const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
+    await prisma.session.updateMany({
+      where: {
+        companionId: companion.id,
+        status: { in: ACTIVE_SESSION_STATUSES },
+        endedAt: null,
+        updatedAt: { lt: staleThreshold },
+      },
+      data: {
+        status: SessionStatus.EXPIRED,
+        endedAt: new Date(),
+      },
+    });
+
+    const companionBusySession = await prisma.session.findFirst({
+      where: {
+        companionId: companion.id,
+        status: { in: ACTIVE_SESSION_STATUSES },
+        endedAt: null,
+        updatedAt: { gte: staleThreshold },
+      },
+      select: { id: true },
+    });
+    if (companionBusySession) {
+      throw new HttpError(409, "Partner is currently busy.");
+    }
+
     const session = await prisma.session.create({
       data: {
         sessionCode: createCode("SES"),
@@ -376,6 +433,77 @@ sessionsRouter.post(
     res.status(201).json({
       session: toSessionResponse(session, authUser.id),
     });
+  }),
+);
+
+sessionsRouter.post(
+  "/:id/mark-live",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const payload = markLiveSchema.parse(req.body ?? {});
+    if (!payload.mediaReady) {
+      const existing = await findSessionForActor(String(req.params.id), authUser.id);
+      if (!existing) throw new HttpError(404, "Session not found.");
+      res.json({ session: toSessionResponse(existing, authUser.id) });
+      return;
+    }
+
+    const session = await findSessionForActor(String(req.params.id), authUser.id);
+    if (!session) throw new HttpError(404, "Session not found.");
+    if (session.serviceType === ServiceType.CHAT) {
+      throw new HttpError(400, "mark-live is only available for audio/video sessions.");
+    }
+    if (isSessionTerminal(session.status)) {
+      res.json({ session: toSessionResponse(session, authUser.id) });
+      return;
+    }
+
+    const companionUserId = session.companion?.userId;
+    const actorRole =
+      authUser.id === session.userId ? "user" : companionUserId && authUser.id === companionUserId ? "partner" : null;
+    if (!actorRole) throw new HttpError(403, "You are not allowed to update this session.");
+
+    const now = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const current = await tx.session.findUnique({
+        where: { id: session.id },
+        select: {
+          id: true,
+          userMediaReadyAt: true,
+          partnerMediaReadyAt: true,
+          liveStartedAt: true,
+          acceptedAt: true,
+          startedAt: true,
+          status: true,
+        },
+      });
+      if (!current) throw new HttpError(404, "Session not found.");
+
+      const nextUserReadyAt = actorRole === "user" ? current.userMediaReadyAt ?? now : current.userMediaReadyAt;
+      const nextPartnerReadyAt = actorRole === "partner" ? current.partnerMediaReadyAt ?? now : current.partnerMediaReadyAt;
+      const shouldGoLive = !current.liveStartedAt && Boolean(nextUserReadyAt && nextPartnerReadyAt);
+
+      return tx.session.update({
+        where: { id: session.id },
+        data: {
+          userMediaReadyAt: nextUserReadyAt,
+          partnerMediaReadyAt: nextPartnerReadyAt,
+          acceptedAt: current.acceptedAt ?? now,
+          liveStartedAt: shouldGoLive ? now : current.liveStartedAt,
+          startedAt: shouldGoLive ? current.startedAt ?? now : current.startedAt,
+          status: shouldGoLive ? SessionStatus.LIVE : current.status,
+          lastHeartbeatAt: now,
+        },
+        include: {
+          user: true,
+          companion: true,
+          booking: true,
+        },
+      });
+    });
+
+    res.json({ session: toSessionResponse(updated, authUser.id) });
   }),
 );
 

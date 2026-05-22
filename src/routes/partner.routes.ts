@@ -442,6 +442,10 @@ partnerRouter.get(
       }));
     }
 
+    const isBusy = activeSessions.length > 0;
+    const isOnline = Boolean(companion?.isOnline);
+    const effectiveStatus = !isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+
     res.json({
       hasApplication: Boolean(application),
       applicationStatus: application?.status ?? "NOT_SUBMITTED",
@@ -481,8 +485,15 @@ partnerRouter.get(
             status: companion.status,
             verificationStatus: companion.verificationStatus,
             isOnline: companion.isOnline,
+            isBusy,
+            effectiveStatus,
           }
         : null,
+      availability: {
+        isOnline,
+        isBusy,
+        effectiveStatus,
+      },
       application: application ?? null,
       stats,
       pendingRequests,
@@ -561,6 +572,7 @@ partnerRouter.post(
           channelName: buildChannelName(existing.id),
           acceptedAt: existing.acceptedAt,
           startedAt: existing.startedAt,
+          liveStartedAt: existing.liveStartedAt,
           endedAt: existing.endedAt,
           userId: existing.userId,
           companionId: existing.companionId,
@@ -571,12 +583,19 @@ partnerRouter.post(
     }
 
     const now = new Date();
+    const nextStatus = existing.serviceType === ServiceType.CHAT ? SessionStatus.LIVE : SessionStatus.ACCEPTED;
+    const nextLiveStartedAt = existing.serviceType === ServiceType.CHAT ? existing.liveStartedAt ?? now : existing.liveStartedAt;
+    const nextStartedAt =
+      existing.serviceType === ServiceType.CHAT
+        ? existing.startedAt ?? existing.liveStartedAt ?? existing.acceptedAt ?? now
+        : existing.startedAt;
     const updated = await prisma.session.update({
       where: { id: existing.id },
       data: {
-        status: SessionStatus.LIVE,
+        status: nextStatus,
         acceptedAt: existing.acceptedAt ?? now,
-        startedAt: existing.startedAt ?? existing.acceptedAt ?? now,
+        liveStartedAt: nextLiveStartedAt,
+        startedAt: nextStartedAt,
         lastHeartbeatAt: now,
       },
     });
@@ -589,6 +608,7 @@ partnerRouter.post(
         channelName: buildChannelName(updated.id),
         acceptedAt: updated.acceptedAt,
         startedAt: updated.startedAt,
+        liveStartedAt: updated.liveStartedAt,
         endedAt: updated.endedAt,
         userId: updated.userId,
         companionId: updated.companionId,
