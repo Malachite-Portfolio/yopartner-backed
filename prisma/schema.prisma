@@ -116,6 +116,10 @@ model Companion {
   status              CompanionStatus        @default(UNDER_REVIEW)
   verificationStatus  VerificationStatus     @default(PENDING)
   isOnline            Boolean                @default(false)
+  profileImageUrl     String?
+  profileImageStoragePath String?
+  galleryImageUrls    String[]               @default([])
+  galleryImageStoragePaths String[]          @default([])
   createdAt           DateTime               @default(now())
   updatedAt           DateTime               @updatedAt
   bookings            Booking[]

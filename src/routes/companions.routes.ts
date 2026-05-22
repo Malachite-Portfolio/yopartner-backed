@@ -68,6 +68,8 @@ companionsRouter.get(
         const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
         return {
           ...companion,
+          image: companion.profileImageUrl ?? null,
+          galleryImages: companion.galleryImageUrls,
           isBusy,
           effectiveStatus,
         };
@@ -91,6 +93,8 @@ companionsRouter.get(
         const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
         return {
           ...companion,
+          image: companion.profileImageUrl ?? null,
+          galleryImages: companion.galleryImageUrls,
           isBusy,
           effectiveStatus,
         };
@@ -134,6 +138,14 @@ companionsRouter.get(
     });
     const isBusy = Boolean(active);
     const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
-    res.json({ companion: { ...companion, isBusy, effectiveStatus } });
+    res.json({
+      companion: {
+        ...companion,
+        image: companion.profileImageUrl ?? null,
+        galleryImages: companion.galleryImageUrls,
+        isBusy,
+        effectiveStatus,
+      },
+    });
   }),
 );

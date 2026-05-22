@@ -52,8 +52,24 @@ const partnerAvailabilitySchema = z.object({
   isOnline: z.boolean(),
 });
 
+const partnerProfileImageSchema = z.object({
+  imageUrl: z.string().url(),
+  storagePath: z.string().min(1).max(500),
+});
+
+const partnerGalleryImageSchema = z.object({
+  imageUrl: z.string().url(),
+  storagePath: z.string().min(1).max(500),
+});
+
+const partnerDeleteGalleryImageSchema = z.object({
+  imageUrl: z.string().url().optional(),
+  storagePath: z.string().min(1).max(500).optional(),
+});
+
 const MAX_CHAT_AUDIO_VIDEO_PRICE = 10000;
 const MAX_HOME_VISIT_PRICE = 100000;
+const MAX_GALLERY_IMAGES = 6;
 const STALE_LIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.LIVE, SessionStatus.ACCEPTED];
 
@@ -726,6 +742,189 @@ partnerRouter.patch(
     });
 
     res.json({ companion: updated });
+  }),
+);
+
+partnerRouter.get(
+  "/profile/media",
+  requireAuth,
+  requireRole([Role.PARTNER, Role.ADMIN]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const companion = await prisma.companion.findFirst({
+      where: { userId: authUser.id },
+      select: {
+        id: true,
+        profileImageUrl: true,
+        profileImageStoragePath: true,
+        galleryImageUrls: true,
+        galleryImageStoragePaths: true,
+      },
+    });
+
+    if (!companion) {
+      throw new HttpError(404, "Companion profile not found.");
+    }
+
+    const galleryItems = companion.galleryImageUrls.map((imageUrl, index) => ({
+      imageUrl,
+      storagePath: companion.galleryImageStoragePaths[index] ?? "",
+    }));
+
+    res.json({
+      profileImageUrl: companion.profileImageUrl,
+      profileImageStoragePath: companion.profileImageStoragePath,
+      galleryImages: galleryItems,
+    });
+  }),
+);
+
+partnerRouter.put(
+  "/profile/media/profile-image",
+  requireAuth,
+  requireRole([Role.PARTNER, Role.ADMIN]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const payload = partnerProfileImageSchema.parse(req.body);
+    const companion = await prisma.companion.findFirst({
+      where: { userId: authUser.id },
+      select: { id: true },
+    });
+    if (!companion) {
+      throw new HttpError(404, "Companion profile not found.");
+    }
+
+    const updated = await prisma.companion.update({
+      where: { id: companion.id },
+      data: {
+        profileImageUrl: payload.imageUrl,
+        profileImageStoragePath: payload.storagePath,
+      },
+      select: {
+        profileImageUrl: true,
+        profileImageStoragePath: true,
+      },
+    });
+
+    res.json({
+      profileImageUrl: updated.profileImageUrl,
+      profileImageStoragePath: updated.profileImageStoragePath,
+    });
+  }),
+);
+
+partnerRouter.post(
+  "/profile/media/gallery",
+  requireAuth,
+  requireRole([Role.PARTNER, Role.ADMIN]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const payload = partnerGalleryImageSchema.parse(req.body);
+    const companion = await prisma.companion.findFirst({
+      where: { userId: authUser.id },
+      select: {
+        id: true,
+        galleryImageUrls: true,
+        galleryImageStoragePaths: true,
+      },
+    });
+    if (!companion) {
+      throw new HttpError(404, "Companion profile not found.");
+    }
+
+    const existingIndexByPath = companion.galleryImageStoragePaths.findIndex((path) => path === payload.storagePath);
+    const existingIndexByUrl = companion.galleryImageUrls.findIndex((url) => url === payload.imageUrl);
+    const isExisting = existingIndexByPath >= 0 || existingIndexByUrl >= 0;
+
+    let nextUrls = [...companion.galleryImageUrls];
+    let nextPaths = [...companion.galleryImageStoragePaths];
+    if (!isExisting) {
+      if (nextUrls.length >= MAX_GALLERY_IMAGES) {
+        throw new HttpError(400, `You can upload up to ${MAX_GALLERY_IMAGES} gallery images.`);
+      }
+      nextUrls.push(payload.imageUrl);
+      nextPaths.push(payload.storagePath);
+    } else {
+      const existingIndex = existingIndexByPath >= 0 ? existingIndexByPath : existingIndexByUrl;
+      nextUrls[existingIndex] = payload.imageUrl;
+      nextPaths[existingIndex] = payload.storagePath;
+    }
+
+    const updated = await prisma.companion.update({
+      where: { id: companion.id },
+      data: {
+        galleryImageUrls: nextUrls,
+        galleryImageStoragePaths: nextPaths,
+      },
+      select: {
+        galleryImageUrls: true,
+        galleryImageStoragePaths: true,
+      },
+    });
+
+    res.status(201).json({
+      galleryImages: updated.galleryImageUrls.map((imageUrl, index) => ({
+        imageUrl,
+        storagePath: updated.galleryImageStoragePaths[index] ?? "",
+      })),
+    });
+  }),
+);
+
+partnerRouter.delete(
+  "/profile/media/gallery",
+  requireAuth,
+  requireRole([Role.PARTNER, Role.ADMIN]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const payload = partnerDeleteGalleryImageSchema.parse(req.body ?? {});
+    if (!payload.imageUrl && !payload.storagePath) {
+      throw new HttpError(400, "imageUrl or storagePath is required.");
+    }
+
+    const companion = await prisma.companion.findFirst({
+      where: { userId: authUser.id },
+      select: {
+        id: true,
+        galleryImageUrls: true,
+        galleryImageStoragePaths: true,
+      },
+    });
+    if (!companion) {
+      throw new HttpError(404, "Companion profile not found.");
+    }
+
+    const matchIndex = companion.galleryImageUrls.findIndex((url, index) => {
+      if (payload.storagePath && companion.galleryImageStoragePaths[index] === payload.storagePath) return true;
+      if (payload.imageUrl && url === payload.imageUrl) return true;
+      return false;
+    });
+
+    if (matchIndex < 0) {
+      throw new HttpError(404, "Gallery image not found.");
+    }
+
+    const nextUrls = companion.galleryImageUrls.filter((_, index) => index !== matchIndex);
+    const nextPaths = companion.galleryImageStoragePaths.filter((_, index) => index !== matchIndex);
+
+    const updated = await prisma.companion.update({
+      where: { id: companion.id },
+      data: {
+        galleryImageUrls: nextUrls,
+        galleryImageStoragePaths: nextPaths,
+      },
+      select: {
+        galleryImageUrls: true,
+        galleryImageStoragePaths: true,
+      },
+    });
+
+    res.json({
+      galleryImages: updated.galleryImageUrls.map((imageUrl, index) => ({
+        imageUrl,
+        storagePath: updated.galleryImageStoragePaths[index] ?? "",
+      })),
+    });
   }),
 );
 
