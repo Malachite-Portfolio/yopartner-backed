@@ -1,11 +1,14 @@
 import { Router } from "express";
 import { CompanionStatus, Prisma, Role, ServiceType, SessionStatus, VerificationStatus } from "@prisma/client";
+import type { DecodedIdToken } from "firebase-admin/auth";
 import { z, ZodError } from "zod";
 import { requireAuth } from "../middlewares/auth";
 import { requireRole } from "../middlewares/roles";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { HttpError } from "../utils/http";
+import { firebaseAdminAuth, isFirebaseAdminConfigured } from "../config/firebaseAdmin";
+import { env } from "../config/env";
 
 const onboardingSchema = z.object({
   fullName: z.string().min(2),
@@ -72,6 +75,12 @@ const MAX_HOME_VISIT_PRICE = 100000;
 const MAX_GALLERY_IMAGES = 6;
 const STALE_LIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.LIVE, SessionStatus.ACCEPTED];
+const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
+
+function isPartnerPresenceFresh(companion: { isOnline: boolean; updatedAt: Date }) {
+  if (!companion.isOnline) return false;
+  return Date.now() - companion.updatedAt.getTime() <= PARTNER_PRESENCE_STALE_MS;
+}
 
 function maskPhoneNumber(value: string) {
   const digits = value.replace(/\D/g, "");
@@ -460,7 +469,9 @@ partnerRouter.get(
 
     const isBusy = activeSessions.length > 0;
     const isOnline = Boolean(companion?.isOnline);
-    const effectiveStatus = !isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+    const isPresenceOnline = companion ? isPartnerPresenceFresh(companion) : false;
+    const effectiveOnline = isOnline && isPresenceOnline;
+    const effectiveStatus = !effectiveOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
 
     res.json({
       hasApplication: Boolean(application),
@@ -500,13 +511,16 @@ partnerRouter.get(
             id: companion.id,
             status: companion.status,
             verificationStatus: companion.verificationStatus,
-            isOnline: companion.isOnline,
+            isOnline: effectiveOnline,
+            rawIsOnline: companion.isOnline,
             isBusy,
             effectiveStatus,
           }
         : null,
       availability: {
-        isOnline,
+        isOnline: effectiveOnline,
+        rawIsOnline: isOnline,
+        presenceFresh: isPresenceOnline,
         isBusy,
         effectiveStatus,
       },
@@ -720,6 +734,138 @@ partnerRouter.patch(
       isOnline: updated.isOnline,
       companion: updated,
     });
+  }),
+);
+
+partnerRouter.post(
+  "/presence/online",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const companion = await prisma.companion.findFirst({
+      where: { userId: authUser.id },
+    });
+    if (!companion) {
+      throw new HttpError(404, "Companion profile not found.");
+    }
+
+    const updated = await prisma.companion.update({
+      where: { id: companion.id },
+      data: { isOnline: true },
+    });
+
+    res.json({
+      isOnline: true,
+      rawIsOnline: updated.isOnline,
+      presenceFresh: true,
+      effectiveStatus: "ONLINE",
+      updatedAt: updated.updatedAt,
+    });
+  }),
+);
+
+partnerRouter.post(
+  "/presence/heartbeat",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const companion = await prisma.companion.findFirst({
+      where: { userId: authUser.id },
+    });
+    if (!companion) {
+      throw new HttpError(404, "Companion profile not found.");
+    }
+
+    const updated = await prisma.companion.update({
+      where: { id: companion.id },
+      data: { isOnline: companion.isOnline },
+    });
+    const effectiveOnline = isPartnerPresenceFresh(updated);
+
+    res.json({
+      isOnline: effectiveOnline,
+      rawIsOnline: updated.isOnline,
+      presenceFresh: effectiveOnline,
+      effectiveStatus: effectiveOnline ? "ONLINE" : "OFFLINE",
+      updatedAt: updated.updatedAt,
+    });
+  }),
+);
+
+partnerRouter.post(
+  "/presence/offline",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const companion = await prisma.companion.findFirst({
+      where: { userId: authUser.id },
+    });
+    if (!companion) {
+      throw new HttpError(404, "Companion profile not found.");
+    }
+
+    const updated = await prisma.companion.update({
+      where: { id: companion.id },
+      data: { isOnline: false },
+    });
+
+    res.json({
+      isOnline: false,
+      rawIsOnline: updated.isOnline,
+      presenceFresh: false,
+      effectiveStatus: "OFFLINE",
+      updatedAt: updated.updatedAt,
+    });
+  }),
+);
+
+partnerRouter.post(
+  "/presence/offline-beacon",
+  asyncHandler(async (req, res) => {
+    const idToken = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+    if (!idToken) {
+      res.status(400).json({ error: "TOKEN_REQUIRED" });
+      return;
+    }
+    if (!firebaseAdminAuth || !isFirebaseAdminConfigured()) {
+      res.status(503).json({ error: "SERVICE_UNAVAILABLE" });
+      return;
+    }
+
+    let decoded: DecodedIdToken;
+    try {
+      decoded = await firebaseAdminAuth.verifyIdToken(idToken);
+    } catch {
+      res.status(401).json({ error: "UNAUTHORIZED" });
+      return;
+    }
+
+    if (decoded.aud !== env.FIREBASE_ADMIN_PROJECT_ID) {
+      res.status(401).json({ error: "UNAUTHORIZED" });
+      return;
+    }
+
+    const companionOwner = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { firebaseUid: decoded.uid },
+          ...(decoded.phone_number ? [{ phoneNumber: decoded.phone_number }] : []),
+        ],
+      },
+      select: { id: true },
+    });
+
+    if (!companionOwner) {
+      res.status(404).json({ error: "USER_NOT_FOUND" });
+      return;
+    }
+
+    await prisma.companion.updateMany({
+      where: { userId: companionOwner.id },
+      data: { isOnline: false },
+    });
+
+    res.status(202).json({ ok: true });
   }),
 );
 

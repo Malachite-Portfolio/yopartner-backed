@@ -25,6 +25,12 @@ const markLiveSchema = z.object({
 export const sessionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
+const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
+
+function isCompanionPresenceOnline(companion: { isOnline: boolean; updatedAt: Date }) {
+  if (!companion.isOnline) return false;
+  return Date.now() - companion.updatedAt.getTime() <= PARTNER_PRESENCE_STALE_MS;
+}
 
 function hashToPositiveInt(input: string) {
   let hash = 0;
@@ -335,6 +341,9 @@ sessionsRouter.post(
     if (!companion) throw new HttpError(404, "Companion not found.");
     if (companion.status !== CompanionStatus.ACTIVE || companion.verificationStatus !== VerificationStatus.VERIFIED) {
       throw new HttpError(403, "Companion is not available for new sessions yet.");
+    }
+    if (!isCompanionPresenceOnline(companion)) {
+      throw new HttpError(409, "Partner is currently offline.");
     }
 
     const serviceType =
