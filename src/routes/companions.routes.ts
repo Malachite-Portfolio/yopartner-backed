@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { CompanionStatus, SessionStatus } from "@prisma/client";
+import { CompanionStatus, SessionStatus, VerificationStatus } from "@prisma/client";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 
@@ -132,6 +132,20 @@ companionsRouter.get(
         };
       }),
     });
+  }),
+);
+
+companionsRouter.get(
+  "/stats",
+  asyncHandler(async (_req, res) => {
+    const totalActiveCompanions = await prisma.companion.count({
+      where: {
+        status: CompanionStatus.ACTIVE,
+        verificationStatus: VerificationStatus.VERIFIED,
+      },
+    });
+
+    res.json({ totalActiveCompanions });
   }),
 );
 
