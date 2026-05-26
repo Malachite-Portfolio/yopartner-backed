@@ -1,5 +1,10 @@
 import { Router } from "express";
-import { CompanionStatus, SessionStatus, VerificationStatus } from "@prisma/client";
+import {
+  CompanionStatus,
+  PartnerApplicationStatus,
+  SessionStatus,
+  VerificationStatus,
+} from "@prisma/client";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 
@@ -11,6 +16,59 @@ const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
 function isPresenceFresh(companion: { isOnline: boolean; updatedAt: Date }) {
   if (!companion.isOnline) return false;
   return Date.now() - companion.updatedAt.getTime() <= PARTNER_PRESENCE_STALE_MS;
+}
+
+function toPublicCompanionSummary(
+  companion: {
+    id: string;
+    displayName: string;
+    tagline: string | null;
+    city: string | null;
+    category: string | null;
+    languages: string[];
+    servicesOffered: unknown[];
+    chatPrice: number;
+    audioPrice: number;
+    videoPrice: number;
+    rating: number;
+    isOnline: boolean;
+    updatedAt: Date;
+    profileImageUrl: string | null;
+    galleryImageUrls: string[];
+  },
+  profileImageFallback: string | null | undefined,
+  isBusy: boolean,
+) {
+  const effectiveOnline = isPresenceFresh(companion);
+  const effectiveStatus = !effectiveOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+  const profileImageUrl = companion.profileImageUrl ?? profileImageFallback ?? null;
+
+  return {
+    id: companion.id,
+    displayName: companion.displayName,
+    name: companion.displayName,
+    tagline: companion.tagline ?? "",
+    city: companion.city,
+    category: companion.category,
+    languages: companion.languages,
+    servicesOffered: companion.servicesOffered,
+    chatPrice: companion.chatPrice,
+    audioPrice: companion.audioPrice,
+    videoPrice: companion.videoPrice,
+    chatRate: companion.chatPrice,
+    audioRate: companion.audioPrice,
+    videoRate: companion.videoPrice,
+    rating: companion.rating,
+    ratingAverage: companion.rating,
+    profileImageUrl,
+    image: profileImageUrl,
+    galleryImageUrls: companion.galleryImageUrls,
+    galleryImages: companion.galleryImageUrls,
+    resolvedProfileImageUrl: profileImageUrl,
+    isOnline: effectiveOnline,
+    isBusy,
+    effectiveStatus,
+  };
 }
 
 async function getBusyCompanionIds(companionIds: string[]) {
@@ -79,20 +137,10 @@ companionsRouter.get(
     const busySet = await getBusyCompanionIds(companions.map((companion) => companion.id));
     res.json({
       companions: companions.map((companion) => {
-        const { partnerApplications, ...companionData } = companion;
+        const { partnerApplications } = companion;
         const isBusy = busySet.has(companion.id);
-        const effectiveOnline = isPresenceFresh(companionData);
-        const effectiveStatus = !effectiveOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
         const resolvedProfileImageUrl = companion.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
-        return {
-          ...companionData,
-          image: resolvedProfileImageUrl,
-          galleryImages: companionData.galleryImageUrls,
-          resolvedProfileImageUrl,
-          isOnline: effectiveOnline,
-          isBusy,
-          effectiveStatus,
-        };
+        return toPublicCompanionSummary(companion, resolvedProfileImageUrl, isBusy);
       }),
     });
   }),
@@ -120,20 +168,10 @@ companionsRouter.get(
     const busySet = await getBusyCompanionIds(companions.map((companion) => companion.id));
     res.json({
       companions: companions.map((companion) => {
-        const { partnerApplications, ...companionData } = companion;
+        const { partnerApplications } = companion;
         const isBusy = busySet.has(companion.id);
-        const effectiveOnline = isPresenceFresh(companionData);
-        const effectiveStatus = !effectiveOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
         const resolvedProfileImageUrl = companion.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
-        return {
-          ...companionData,
-          image: resolvedProfileImageUrl,
-          galleryImages: companionData.galleryImageUrls,
-          resolvedProfileImageUrl,
-          isOnline: effectiveOnline,
-          isBusy,
-          effectiveStatus,
-        };
+        return toPublicCompanionSummary(companion, resolvedProfileImageUrl, isBusy);
       }),
     });
   }),
@@ -164,10 +202,49 @@ companionsRouter.get(
       },
       include: {
         partnerApplications: {
-          where: { selfieUrl: { not: null } },
+          where: {
+            status: {
+              in: [PartnerApplicationStatus.APPROVED],
+            },
+          },
           orderBy: { createdAt: "desc" },
           take: 1,
-          select: { selfieUrl: true },
+          select: {
+            age: true,
+            gender: true,
+            religion: true,
+            bornCity: true,
+            nationality: true,
+            school: true,
+            college: true,
+            qualification: true,
+            communicationStyle: true,
+            hobbies: true,
+            aboutYourself: true,
+            profileTagline: true,
+            selfieUrl: true,
+          },
+        },
+        reviews: {
+          where: {
+            isApproved: true,
+            isHidden: false,
+          },
+          include: {
+            user: {
+              select: {
+                phoneNumber: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 8,
+        },
+        _count: {
+          select: {
+            sessions: true,
+            reviews: true,
+          },
         },
       },
     });
@@ -199,20 +276,45 @@ companionsRouter.get(
       select: { id: true },
     });
     const isBusy = Boolean(active);
-    const { partnerApplications, ...companionData } = companion;
-    const effectiveOnline = isPresenceFresh(companionData);
-    const effectiveStatus = !effectiveOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
-    const resolvedProfileImageUrl = companionData.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
+    const { partnerApplications, reviews, _count } = companion;
+    const latestProfile = partnerApplications[0];
+    const summary = toPublicCompanionSummary(companion, latestProfile?.selfieUrl ?? null, isBusy);
     res.json({
       companion: {
-        ...companionData,
-        image: resolvedProfileImageUrl,
-        galleryImages: companionData.galleryImageUrls,
-        resolvedProfileImageUrl,
-        isOnline: effectiveOnline,
-        isBusy,
-        effectiveStatus,
+        ...summary,
+        headline: companion.tagline ?? latestProfile?.profileTagline ?? "",
+        tagline: companion.tagline ?? latestProfile?.profileTagline ?? "",
+        age: latestProfile?.age ?? null,
+        gender: latestProfile?.gender ?? null,
+        religion: latestProfile?.religion ?? null,
+        bornCity: latestProfile?.bornCity ?? companion.city ?? null,
+        nationality: latestProfile?.nationality ?? null,
+        school: latestProfile?.school ?? null,
+        college: latestProfile?.college ?? null,
+        qualification: latestProfile?.qualification ?? null,
+        communicationStyle: latestProfile?.communicationStyle ?? [],
+        hobbies: latestProfile?.hobbies ?? [],
+        interests: latestProfile?.hobbies ?? [],
+        about: latestProfile?.aboutYourself ?? null,
+        bio: latestProfile?.aboutYourself ?? null,
+        serviceAreas: companion.city ? [companion.city] : [],
+        sessions: _count.sessions,
+        sessionsCompleted: _count.sessions,
+        reviewsCount: _count.reviews,
+        ratingCount: _count.reviews,
+        reviews: reviews.map((review) => ({
+          rating: review.rating,
+          comment: review.comment,
+          createdAt: review.createdAt,
+          phoneMasked: maskPhone(review.user.phoneNumber),
+        })),
       },
     });
   }),
 );
+
+function maskPhone(phone: string) {
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length < 4) return "******";
+  return `******${digits.slice(-4)}`;
+}
