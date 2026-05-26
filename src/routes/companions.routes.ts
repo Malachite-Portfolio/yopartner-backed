@@ -52,6 +52,7 @@ companionsRouter.get(
     const companions = await prisma.companion.findMany({
       where: {
         status: CompanionStatus.ACTIVE,
+        verificationStatus: VerificationStatus.VERIFIED,
         ...(online ? { isOnline: true } : {}),
         ...(category ? { category: { equals: category, mode: "insensitive" } } : {}),
         ...(search
@@ -101,7 +102,10 @@ companionsRouter.get(
   "/featured",
   asyncHandler(async (_req, res) => {
     const companions = await prisma.companion.findMany({
-      where: { status: CompanionStatus.ACTIVE },
+      where: {
+        status: CompanionStatus.ACTIVE,
+        verificationStatus: VerificationStatus.VERIFIED,
+      },
       orderBy: [{ rating: "desc" }],
       take: 12,
       include: {
@@ -152,8 +156,12 @@ companionsRouter.get(
 companionsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
-    const companion = await prisma.companion.findUnique({
-      where: { id: String(req.params.id) },
+    const companion = await prisma.companion.findFirst({
+      where: {
+        id: String(req.params.id),
+        status: CompanionStatus.ACTIVE,
+        verificationStatus: VerificationStatus.VERIFIED,
+      },
       include: {
         partnerApplications: {
           where: { selfieUrl: { not: null } },
@@ -163,7 +171,7 @@ companionsRouter.get(
         },
       },
     });
-    if (!companion || companion.status !== CompanionStatus.ACTIVE) {
+    if (!companion) {
       res.status(404).json({ error: "NOT_FOUND", message: "Companion not found." });
       return;
     }
