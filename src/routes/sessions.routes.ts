@@ -342,7 +342,20 @@ sessionsRouter.post(
     if (companion.status !== CompanionStatus.ACTIVE || companion.verificationStatus !== VerificationStatus.VERIFIED) {
       throw new HttpError(403, "Companion is not available for new sessions yet.");
     }
-    if (!isCompanionPresenceOnline(companion)) {
+    const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
+    const activeChatBetweenPair = await prisma.session.findFirst({
+      where: {
+        userId: authUser.id,
+        companionId: companion.id,
+        serviceType: ServiceType.CHAT,
+        status: SessionStatus.LIVE,
+        endedAt: null,
+        updatedAt: { gte: staleThreshold },
+      },
+      select: { id: true },
+    });
+    const hasActiveChatEscalationContext = Boolean(activeChatBetweenPair);
+    if (!isCompanionPresenceOnline(companion) && !hasActiveChatEscalationContext) {
       throw new HttpError(409, "Partner is currently offline.");
     }
 
@@ -391,7 +404,6 @@ sessionsRouter.post(
       return;
     }
 
-    const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
     await prisma.session.updateMany({
       where: {
         companionId: companion.id,
@@ -411,6 +423,7 @@ sessionsRouter.post(
         status: { in: ACTIVE_SESSION_STATUSES },
         endedAt: null,
         updatedAt: { gte: staleThreshold },
+        ...(hasActiveChatEscalationContext ? { NOT: { userId: authUser.id } } : {}),
       },
       select: { id: true },
     });
