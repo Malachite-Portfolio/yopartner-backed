@@ -221,6 +221,7 @@ model Session {
   safetyFlag       Boolean       @default(false)
   safetyNote       String?
   messages         ChatMessage[]
+  review           Review?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 }
@@ -283,6 +284,8 @@ model Review {
   user          User        @relation("UserReviews", fields: [userId], references: [id], onDelete: Cascade)
   companionId   String
   companion     Companion   @relation("CompanionReviews", fields: [companionId], references: [id], onDelete: Cascade)
+  sessionId     String?     @unique
+  session       Session?    @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   rating        Int
   comment       String
   isApproved    Boolean     @default(false)
