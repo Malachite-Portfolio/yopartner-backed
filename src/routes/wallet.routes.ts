@@ -85,43 +85,9 @@ walletRouter.post(
   "/verify-recharge",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const authUser = req.authUser!;
-    const body = verifyOrderSchema.parse(req.body);
-    const wallet = await prisma.walletAccount.findUnique({
-      where: { userId: authUser.id },
-    });
-    if (!wallet) throw new HttpError(404, "Wallet account not found.");
-
-    const transaction = await prisma.walletTransaction.findFirst({
-      where: {
-        transactionCode: body.transactionCode,
-        walletAccountId: wallet.id,
-        type: TransactionType.RECHARGE,
-      },
-    });
-    if (!transaction) throw new HttpError(404, "Recharge transaction not found.");
-    if (transaction.status === TransactionStatus.SUCCESS) {
-      res.json({ transaction, wallet });
-      return;
-    }
-
-    const [updatedTransaction, updatedWallet] = await prisma.$transaction([
-      prisma.walletTransaction.update({
-        where: { id: transaction.id },
-        data: {
-          status: TransactionStatus.SUCCESS,
-          referenceId: body.gatewayReferenceId,
-        },
-      }),
-      prisma.walletAccount.update({
-        where: { id: wallet.id },
-        data: { balance: { increment: transaction.amount } },
-      }),
-    ]);
-
-    res.json({
-      transaction: updatedTransaction,
-      wallet: updatedWallet,
-    });
+    void req;
+    void res;
+    verifyOrderSchema.parse(req.body);
+    throw new HttpError(410, "Legacy recharge verification is disabled. Use Razorpay verification endpoint.");
   }),
 );

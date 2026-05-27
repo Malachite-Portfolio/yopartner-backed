@@ -13,6 +13,7 @@ export const errorHandler = (
     return;
   }
 
+  console.error("[errorHandler] unexpected error", err);
   res.status(500).json({
     error: "INTERNAL_SERVER_ERROR",
     message: "Unexpected server error.",
