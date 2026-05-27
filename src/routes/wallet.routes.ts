@@ -22,11 +22,18 @@ walletRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const wallet = await prisma.walletAccount.findUnique({
+    const wallet = await prisma.walletAccount.upsert({
       where: { userId: authUser.id },
+      update: {},
+      create: { userId: authUser.id },
     });
-    if (!wallet) throw new HttpError(404, "Wallet account not found.");
-    res.json({ wallet });
+    res.json({
+      id: wallet.id,
+      userId: wallet.userId,
+      balance: wallet.balance,
+      currency: "INR",
+      wallet,
+    });
   }),
 );
 
@@ -35,10 +42,11 @@ walletRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const wallet = await prisma.walletAccount.findUnique({
+    const wallet = await prisma.walletAccount.upsert({
       where: { userId: authUser.id },
+      update: {},
+      create: { userId: authUser.id },
     });
-    if (!wallet) throw new HttpError(404, "Wallet account not found.");
     const transactions = await prisma.walletTransaction.findMany({
       where: { walletAccountId: wallet.id },
       orderBy: { createdAt: "desc" },

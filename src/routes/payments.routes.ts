@@ -119,13 +119,11 @@ paymentsRouter.post(
     const body = razorpayOrderSchema.parse(req.body);
     const quote = assertRechargeQuote(body);
 
-    const wallet = await prisma.walletAccount.findUnique({
+    const wallet = await prisma.walletAccount.upsert({
       where: { userId: authUser.id },
+      update: {},
+      create: { userId: authUser.id },
     });
-
-    if (!wallet) {
-      throw new HttpError(404, "Wallet account not found.");
-    }
 
     const transaction = await prisma.walletTransaction.create({
       data: {
@@ -211,13 +209,11 @@ paymentsRouter.post(
       throw new HttpError(400, "Payment signature verification failed.");
     }
 
-    const wallet = await prisma.walletAccount.findUnique({
+    const wallet = await prisma.walletAccount.upsert({
       where: { userId: authUser.id },
+      update: {},
+      create: { userId: authUser.id },
     });
-
-    if (!wallet) {
-      throw new HttpError(404, "Wallet account not found.");
-    }
 
     const duplicateCredit = await prisma.walletTransaction.findFirst({
       where: {
@@ -249,20 +245,38 @@ paymentsRouter.post(
       throw new HttpError(400, "Wallet credit mismatch for this order.");
     }
 
-    const [updatedTransaction, updatedWallet] = await prisma.$transaction([
-      prisma.walletTransaction.update({
-        where: { id: pendingTransaction.id },
+    const { updatedTransaction, updatedWallet } = await prisma.$transaction(async (tx) => {
+      const updateResult = await tx.walletTransaction.updateMany({
+        where: {
+          id: pendingTransaction.id,
+          status: TransactionStatus.PENDING,
+        },
         data: {
           status: TransactionStatus.SUCCESS,
           referenceId: body.razorpay_payment_id,
           reason: `Razorpay verified (order=${body.razorpay_order_id}, pay=${quote.payAmount}, gst=${quote.gstAmount}, bonus=${quote.bonusAmount}, plan=${body.planId ?? "custom"})`,
         },
-      }),
-      prisma.walletAccount.update({
+      });
+
+      if (updateResult.count === 0) {
+        throw new HttpError(409, "Payment already verified.");
+      }
+
+      const updatedWallet = await tx.walletAccount.update({
         where: { id: wallet.id },
         data: { balance: { increment: quote.walletCredit } },
-      }),
-    ]);
+      });
+
+      const updatedTransaction = await tx.walletTransaction.findUnique({
+        where: { id: pendingTransaction.id },
+      });
+
+      if (!updatedTransaction) {
+        throw new HttpError(404, "Recharge transaction not found after verification.");
+      }
+
+      return { updatedTransaction, updatedWallet };
+    });
 
     res.json({
       success: true,
