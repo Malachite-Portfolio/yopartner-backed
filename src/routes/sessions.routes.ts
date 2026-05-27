@@ -26,6 +26,7 @@ export const sessionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
+const MIN_CHAT_WALLET_BALANCE = 50;
 
 function isCompanionPresenceOnline(companion: { isOnline: boolean; updatedAt: Date }) {
   if (!companion.isOnline) return false;
@@ -402,6 +403,22 @@ sessionsRouter.post(
         session: toSessionResponse(existingActiveForUser, authUser.id),
       });
       return;
+    }
+
+    if (serviceType === ServiceType.CHAT) {
+      const wallet = await prisma.walletAccount.upsert({
+        where: { userId: authUser.id },
+        update: {},
+        create: { userId: authUser.id },
+      });
+
+      if (wallet.balance < MIN_CHAT_WALLET_BALANCE) {
+        res.status(402).json({
+          error: "INSUFFICIENT_WALLET_BALANCE",
+          message: "Minimum ₹50 wallet balance is required to start a chat.",
+        });
+        return;
+      }
     }
 
     await prisma.session.updateMany({

@@ -3,6 +3,7 @@ import {
   CompanionStatus,
   PartnerApplicationStatus,
   PayoutStatus,
+  Prisma,
   Role,
   SessionStatus,
   TransactionStatus,
@@ -24,6 +25,41 @@ const DEMO_PARTNER_FIREBASE_UID = "demo-host-4455667788";
 const shouldExcludeDemoPartner =
   process.env.NEXT_PUBLIC_CLIENT_DEMO_ENABLED !== "true" &&
   process.env.CLIENT_DEMO_ENABLED !== "true";
+
+function parseTransactionType(value: unknown): TransactionType | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase();
+  if (
+    normalized === TransactionType.RECHARGE ||
+    normalized === TransactionType.BOOKING ||
+    normalized === TransactionType.REFUND ||
+    normalized === TransactionType.ADMIN_CREDIT
+  ) {
+    return normalized as TransactionType;
+  }
+  return null;
+}
+
+function parseTransactionStatus(value: unknown): TransactionStatus | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase();
+  if (
+    normalized === TransactionStatus.SUCCESS ||
+    normalized === TransactionStatus.PENDING ||
+    normalized === TransactionStatus.FAILED
+  ) {
+    return normalized as TransactionStatus;
+  }
+  return null;
+}
+
+function parsePaidAmountFromReason(reason: string | null, fallbackAmount: number) {
+  if (!reason) return Math.abs(fallbackAmount);
+  const match = reason.match(/\bpay=(\d+)\b/i);
+  if (!match) return Math.abs(fallbackAmount);
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : Math.abs(fallbackAmount);
+}
 
 adminRouter.get(
   "/dashboard",
@@ -396,6 +432,90 @@ adminRouter.get(
       orderBy: { createdAt: "desc" },
     });
     res.json({ transactions });
+  }),
+);
+
+adminRouter.get(
+  "/wallet/summary",
+  asyncHandler(async (req, res) => {
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const type = parseTransactionType(req.query.type);
+    const status = parseTransactionStatus(req.query.status);
+
+    const where: Prisma.WalletTransactionWhereInput = {};
+    if (type) where.type = type;
+    if (status) where.status = status;
+    if (search) {
+      where.OR = [
+        { transactionCode: { contains: search, mode: "insensitive" } },
+        { referenceId: { contains: search, mode: "insensitive" } },
+        { walletAccount: { user: { phoneNumber: { contains: search, mode: "insensitive" } } } },
+        { walletAccount: { user: { name: { contains: search, mode: "insensitive" } } } },
+      ];
+    }
+
+    const [transactions, rechargedAgg, spentAgg, refundsAgg, totalTransactions] = await Promise.all([
+      prisma.walletTransaction.findMany({
+        where,
+        include: {
+          walletAccount: {
+            include: {
+              user: {
+                select: {
+                  name: true,
+                  phoneNumber: true,
+                },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      }),
+      prisma.walletTransaction.aggregate({
+        where: { type: TransactionType.RECHARGE, status: TransactionStatus.SUCCESS },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      prisma.walletTransaction.aggregate({
+        where: { type: TransactionType.BOOKING, status: TransactionStatus.SUCCESS },
+        _sum: { amount: true },
+      }),
+      prisma.walletTransaction.aggregate({
+        where: { type: TransactionType.REFUND, status: TransactionStatus.SUCCESS },
+        _sum: { amount: true },
+      }),
+      prisma.walletTransaction.count(),
+    ]);
+
+    const totalRecharged = rechargedAgg._sum.amount ?? 0;
+    const totalSpent = Math.abs(spentAgg._sum.amount ?? 0);
+    const totalRefunds = refundsAgg._sum.amount ?? 0;
+    const rechargeCount = rechargedAgg._count.id ?? 0;
+    const averageRecharge = rechargeCount > 0 ? Math.round(totalRecharged / rechargeCount) : 0;
+
+    res.json({
+      totalRecharged,
+      totalSpent,
+      totalRefunds,
+      totalTransactions,
+      averageRecharge,
+      transactions: transactions.map((tx) => ({
+        id: tx.id,
+        transactionId: tx.transactionCode,
+        userPhone: tx.walletAccount.user.phoneNumber,
+        userName: tx.walletAccount.user.name,
+        type: tx.type,
+        amount: tx.amount,
+        status: tx.status,
+        gateway: tx.gateway,
+        createdAt: tx.createdAt,
+        paidAmount: parsePaidAmountFromReason(tx.reason, tx.amount),
+        walletCredit: tx.type === TransactionType.RECHARGE && tx.status === TransactionStatus.SUCCESS
+          ? Math.max(tx.amount, 0)
+          : 0,
+      })),
+    });
   }),
 );
 
