@@ -71,6 +71,10 @@ function toPublicCompanionSummary(
   };
 }
 
+function normalizeStringArray(value: string[] | null | undefined) {
+  return Array.isArray(value) ? value.filter(Boolean) : [];
+}
+
 async function getBusyCompanionIds(companionIds: string[]) {
   if (companionIds.length === 0) return new Set<string>();
   const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
@@ -194,21 +198,75 @@ companionsRouter.get(
 companionsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
-    const companion = await prisma.companion.findFirst({
-      where: {
-        id: String(req.params.id),
-        status: CompanionStatus.ACTIVE,
-        verificationStatus: VerificationStatus.VERIFIED,
-      },
-      include: {
-        partnerApplications: {
+    const companionId = String(req.params.id);
+    try {
+      const companion = await prisma.companion.findFirst({
+        where: {
+          id: companionId,
+          status: CompanionStatus.ACTIVE,
+          verificationStatus: VerificationStatus.VERIFIED,
+        },
+        include: {
+          _count: {
+            select: {
+              sessions: true,
+            },
+          },
+        },
+      });
+      if (!companion) {
+        res.status(404).json({ error: "NOT_FOUND", message: "Companion not found." });
+        return;
+      }
+
+      const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
+      await prisma.session.updateMany({
+        where: {
+          companionId: companion.id,
+          status: { in: ACTIVE_SESSION_STATUSES },
+          endedAt: null,
+          updatedAt: { lt: staleThreshold },
+        },
+        data: {
+          status: SessionStatus.EXPIRED,
+          endedAt: new Date(),
+        },
+      });
+      const active = await prisma.session.findFirst({
+        where: {
+          companionId: companion.id,
+          status: { in: ACTIVE_SESSION_STATUSES },
+          endedAt: null,
+          updatedAt: { gte: staleThreshold },
+        },
+        select: { id: true },
+      });
+
+      let latestProfile: {
+        age: number | null;
+        gender: string | null;
+        religion: string | null;
+        bornCity: string | null;
+        nationality: string | null;
+        school: string | null;
+        college: string | null;
+        qualification: string | null;
+        communicationStyle: string[];
+        hobbies: string[];
+        aboutYourself: string | null;
+        profileTagline: string | null;
+        selfieUrl: string | null;
+      } | null = null;
+
+      try {
+        latestProfile = await prisma.partnerApplication.findFirst({
           where: {
+            companionId: companion.id,
             status: {
               in: [PartnerApplicationStatus.APPROVED],
             },
           },
           orderBy: { createdAt: "desc" },
-          take: 1,
           select: {
             age: true,
             gender: true,
@@ -224,9 +282,22 @@ companionsRouter.get(
             profileTagline: true,
             selfieUrl: true,
           },
-        },
-        reviews: {
+        });
+      } catch (error) {
+        console.error("[companions.detail] failed to load public profile details", { companionId: companion.id, error });
+      }
+
+      let publicReviews: Array<{
+        rating: number;
+        comment: string;
+        createdAt: Date;
+        user: { phoneNumber: string };
+      }> = [];
+
+      try {
+        publicReviews = await prisma.review.findMany({
           where: {
+            companionId: companion.id,
             isApproved: true,
             isHidden: false,
           },
@@ -239,77 +310,59 @@ companionsRouter.get(
           },
           orderBy: { createdAt: "desc" },
           take: 8,
-        },
-        _count: {
-          select: {
-            sessions: true,
-            reviews: true,
-          },
-        },
-      },
-    });
-    if (!companion) {
-      res.status(404).json({ error: "NOT_FOUND", message: "Companion not found." });
-      return;
-    }
+        });
+      } catch (error) {
+        console.error("[companions.detail] failed to load public reviews", { companionId: companion.id, error });
+      }
 
-    const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
-    await prisma.session.updateMany({
-      where: {
-        companionId: companion.id,
-        status: { in: ACTIVE_SESSION_STATUSES },
-        endedAt: null,
-        updatedAt: { lt: staleThreshold },
-      },
-      data: {
-        status: SessionStatus.EXPIRED,
-        endedAt: new Date(),
-      },
-    });
-    const active = await prisma.session.findFirst({
-      where: {
-        companionId: companion.id,
-        status: { in: ACTIVE_SESSION_STATUSES },
-        endedAt: null,
-        updatedAt: { gte: staleThreshold },
-      },
-      select: { id: true },
-    });
-    const isBusy = Boolean(active);
-    const { partnerApplications, reviews, _count } = companion;
-    const latestProfile = partnerApplications[0];
-    const summary = toPublicCompanionSummary(companion, latestProfile?.selfieUrl ?? null, isBusy);
-    res.json({
-      companion: {
-        ...summary,
-        headline: companion.tagline ?? latestProfile?.profileTagline ?? "",
-        tagline: companion.tagline ?? latestProfile?.profileTagline ?? "",
-        age: latestProfile?.age ?? null,
-        gender: latestProfile?.gender ?? null,
-        religion: latestProfile?.religion ?? null,
-        bornCity: latestProfile?.bornCity ?? companion.city ?? null,
-        nationality: latestProfile?.nationality ?? null,
-        school: latestProfile?.school ?? null,
-        college: latestProfile?.college ?? null,
-        qualification: latestProfile?.qualification ?? null,
-        communicationStyle: latestProfile?.communicationStyle ?? [],
-        hobbies: latestProfile?.hobbies ?? [],
-        interests: latestProfile?.hobbies ?? [],
-        about: latestProfile?.aboutYourself ?? null,
-        bio: latestProfile?.aboutYourself ?? null,
-        serviceAreas: companion.city ? [companion.city] : [],
-        sessions: _count.sessions,
-        sessionsCompleted: _count.sessions,
-        reviewsCount: _count.reviews,
-        ratingCount: _count.reviews,
-        reviews: reviews.map((review) => ({
-          rating: review.rating,
-          comment: review.comment,
-          createdAt: review.createdAt,
-          phoneMasked: maskPhone(review.user.phoneNumber),
-        })),
-      },
-    });
+      const isBusy = Boolean(active);
+      const { _count } = companion;
+      const summary = toPublicCompanionSummary(
+        {
+          ...companion,
+          languages: normalizeStringArray(companion.languages),
+          galleryImageUrls: normalizeStringArray(companion.galleryImageUrls),
+        },
+        latestProfile?.selfieUrl ?? null,
+        isBusy,
+      );
+
+      res.json({
+        success: true,
+        companion: {
+          ...summary,
+          headline: companion.tagline ?? latestProfile?.profileTagline ?? "",
+          tagline: companion.tagline ?? latestProfile?.profileTagline ?? "",
+          age: latestProfile?.age ?? null,
+          gender: latestProfile?.gender ?? null,
+          religion: latestProfile?.religion ?? null,
+          bornCity: latestProfile?.bornCity ?? companion.city ?? null,
+          nationality: latestProfile?.nationality ?? null,
+          school: latestProfile?.school ?? null,
+          college: latestProfile?.college ?? null,
+          qualification: latestProfile?.qualification ?? null,
+          communicationStyle: normalizeStringArray(latestProfile?.communicationStyle),
+          hobbies: normalizeStringArray(latestProfile?.hobbies),
+          interests: normalizeStringArray(latestProfile?.hobbies),
+          about: latestProfile?.aboutYourself ?? null,
+          bio: latestProfile?.aboutYourself ?? null,
+          serviceAreas: companion.city ? [companion.city] : [],
+          sessions: _count.sessions,
+          sessionsCompleted: _count.sessions,
+          reviewsCount: publicReviews.length,
+          ratingCount: publicReviews.length,
+          reviews: publicReviews.map((review) => ({
+            rating: review.rating,
+            comment: review.comment,
+            createdAt: review.createdAt,
+            phoneMasked: maskPhone(review.user.phoneNumber),
+          })),
+        },
+      });
+    } catch (error) {
+      console.error("[companions.detail] failed to load companion profile", { companionId, error });
+      throw error;
+    }
   }),
 );
 

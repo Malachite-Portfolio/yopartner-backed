@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { CompanionStatus, ServiceType, SessionStatus, VerificationStatus } from "@prisma/client";
+import { CompanionStatus, ServiceType, SessionStatus, TransactionStatus, TransactionType, VerificationStatus } from "@prisma/client";
 import { RtcRole, RtcTokenBuilder } from "agora-token";
 import { z } from "zod";
 import { requireAuth } from "../middlewares/auth";
@@ -22,11 +22,64 @@ const markLiveSchema = z.object({
   mediaReady: z.boolean().optional(),
 });
 
+const giftCatalog = {
+  rose: { key: "rose", name: "Rose", emoji: "🌹", amount: 10 },
+  coffee: { key: "coffee", name: "Coffee", emoji: "☕", amount: 25 },
+  star: { key: "star", name: "Star", emoji: "⭐", amount: 50 },
+  heart: { key: "heart", name: "Heart", emoji: "💖", amount: 100 },
+  crown: { key: "crown", name: "Crown", emoji: "👑", amount: 250 },
+  diamond: { key: "diamond", name: "Diamond", emoji: "💎", amount: 500 },
+} as const;
+
+const giftMessagePrefix = "__YOP_GIFT__:";
+
+const sendGiftSchema = z.object({
+  giftKey: z.enum(["rose", "coffee", "star", "heart", "crown", "diamond"]),
+});
+
+const giftMessagePayloadSchema = z.object({
+  giftKey: z.enum(["rose", "coffee", "star", "heart", "crown", "diamond"]),
+  giftName: z.string().min(1),
+  giftEmoji: z.string().min(1),
+  amount: z.number().int().positive(),
+});
+
 export const sessionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
 const MIN_CHAT_WALLET_BALANCE = 50;
+
+function buildGiftMessageBody(gift: {
+  key: keyof typeof giftCatalog;
+  name: string;
+  emoji: string;
+  amount: number;
+}) {
+  return `${giftMessagePrefix}${JSON.stringify({
+    giftKey: gift.key,
+    giftName: gift.name,
+    giftEmoji: gift.emoji,
+    amount: gift.amount,
+  })}`;
+}
+
+function parseGiftMessageBody(body: string) {
+  if (!body.startsWith(giftMessagePrefix)) return null;
+
+  try {
+    const rawPayload = JSON.parse(body.slice(giftMessagePrefix.length));
+    const payload = giftMessagePayloadSchema.parse(rawPayload);
+    return {
+      key: payload.giftKey,
+      name: payload.giftName,
+      emoji: payload.giftEmoji,
+      amount: payload.amount,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function isCompanionPresenceOnline(companion: { isOnline: boolean; updatedAt: Date }) {
   if (!companion.isOnline) return false;
@@ -90,6 +143,8 @@ function toMessageResponse(
   },
   authUserId: string,
 ) {
+  const gift = parseGiftMessageBody(message.body);
+  const isGiftMessage = Boolean(gift);
   const senderRole =
     message.senderUserId === session.userId
       ? "USER"
@@ -103,8 +158,17 @@ function toMessageResponse(
     senderId: message.senderUserId,
     senderUserId: message.senderUserId,
     senderRole,
-    text: message.body,
-    body: message.body,
+    messageType: isGiftMessage ? "GIFT" : "TEXT",
+    text: gift ? `${gift.emoji} ${gift.name}` : message.body,
+    body: gift ? `${gift.emoji} ${gift.name}` : message.body,
+    gift: gift
+      ? {
+          giftKey: gift.key,
+          giftName: gift.name,
+          giftEmoji: gift.emoji,
+          amount: gift.amount,
+        }
+      : null,
     createdAt: message.createdAt.toISOString(),
     isMine: message.senderUserId === authUserId,
     senderUser: message.senderUser,
@@ -327,6 +391,114 @@ sessionsRouter.post(
 
     res.status(201).json({
       message: toMessageResponse(created, session, authUser.id),
+    });
+  }),
+);
+
+sessionsRouter.post(
+  "/:id/gifts",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const session = await findSessionForActor(String(req.params.id), authUser.id);
+    if (!session) throw new HttpError(404, "Session not found.");
+    if (session.serviceType !== ServiceType.CHAT || session.status !== SessionStatus.LIVE) {
+      throw new HttpError(400, "Gifts can only be sent in active chat sessions.");
+    }
+    if (session.userId !== authUser.id) {
+      throw new HttpError(403, "Only users can send gifts in this session.");
+    }
+
+    const payload = sendGiftSchema.parse(req.body);
+    const gift = giftCatalog[payload.giftKey];
+    if (!gift) throw new HttpError(400, "Invalid gift selection.");
+
+    const result = await prisma.$transaction(async (tx) => {
+      const wallet = await tx.walletAccount.upsert({
+        where: { userId: authUser.id },
+        update: {},
+        create: { userId: authUser.id },
+      });
+
+      const debited = await tx.walletAccount.updateMany({
+        where: {
+          id: wallet.id,
+          balance: { gte: gift.amount },
+        },
+        data: {
+          balance: { decrement: gift.amount },
+        },
+      });
+
+      if (debited.count === 0) {
+        return { insufficientBalance: true as const };
+      }
+
+      const updatedWallet = await tx.walletAccount.findUnique({
+        where: { id: wallet.id },
+        select: { balance: true },
+      });
+      if (!updatedWallet) throw new HttpError(404, "Wallet account not found.");
+
+      await tx.walletTransaction.create({
+        data: {
+          transactionCode: createCode("TXN"),
+          walletAccountId: wallet.id,
+          type: TransactionType.GIFT,
+          amount: -gift.amount,
+          status: TransactionStatus.SUCCESS,
+          gateway: "WALLET",
+          referenceId: session.id,
+          reason: `Gift ${gift.name} sent in session ${session.sessionCode}`,
+        },
+      });
+
+      const createdMessage = await tx.chatMessage.create({
+        data: {
+          sessionId: session.id,
+          senderUserId: authUser.id,
+          body: buildGiftMessageBody({
+            key: gift.key,
+            name: gift.name,
+            emoji: gift.emoji,
+            amount: gift.amount,
+          }),
+        },
+        include: {
+          senderUser: {
+            select: {
+              id: true,
+              phoneNumber: true,
+              name: true,
+            },
+          },
+        },
+      });
+
+      return {
+        insufficientBalance: false as const,
+        walletBalance: updatedWallet.balance,
+        message: createdMessage,
+      };
+    });
+
+    if (result.insufficientBalance) {
+      res.status(402).json({
+        error: "INSUFFICIENT_WALLET_BALANCE",
+        message: "Minimum wallet balance is not enough for this gift.",
+      });
+      return;
+    }
+
+    res.status(201).json({
+      walletBalance: result.walletBalance,
+      gift: {
+        giftKey: gift.key,
+        giftName: gift.name,
+        giftEmoji: gift.emoji,
+        amount: gift.amount,
+      },
+      message: toMessageResponse(result.message, session, authUser.id),
     });
   }),
 );

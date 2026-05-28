@@ -32,6 +32,7 @@ function parseTransactionType(value: unknown): TransactionType | null {
   if (
     normalized === TransactionType.RECHARGE ||
     normalized === TransactionType.BOOKING ||
+    normalized === TransactionType.GIFT ||
     normalized === TransactionType.REFUND ||
     normalized === TransactionType.ADMIN_CREDIT
   ) {
@@ -478,7 +479,10 @@ adminRouter.get(
         _count: { id: true },
       }),
       prisma.walletTransaction.aggregate({
-        where: { type: TransactionType.BOOKING, status: TransactionStatus.SUCCESS },
+        where: {
+          type: { in: [TransactionType.BOOKING, TransactionType.GIFT] },
+          status: TransactionStatus.SUCCESS,
+        },
         _sum: { amount: true },
       }),
       prisma.walletTransaction.aggregate({
