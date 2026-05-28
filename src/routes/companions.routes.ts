@@ -75,6 +75,47 @@ function normalizeStringArray(value: string[] | null | undefined) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
 
+function cleanText(value: string | null | undefined) {
+  if (typeof value !== "string") return "";
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function normalizeServiceLabel(value: string) {
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "CHAT") return "Chat";
+  if (normalized === "AUDIO") return "Audio Call";
+  if (normalized === "VIDEO") return "Video Call";
+  if (normalized === "HOME_VISIT") return "Home Visit";
+  return value.trim();
+}
+
+function normalizeServiceArray(value: unknown[] | string[] | null | undefined) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item) => typeof item === "string")
+    .map((item) => normalizeServiceLabel(String(item)))
+    .filter(Boolean);
+}
+
+function isSafePublicUrl(value: string | null | undefined) {
+  const text = cleanText(value);
+  if (!text) return false;
+  if (/^(https?:\/\/)/i.test(text)) return true;
+  if (text.startsWith("/")) return true;
+  return false;
+}
+
+function sanitizePublicUrl(value: string | null | undefined) {
+  return isSafePublicUrl(value) ? cleanText(value) : null;
+}
+
+function sanitizePublicUrls(values: string[] | null | undefined) {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((value) => sanitizePublicUrl(value))
+    .filter((value): value is string => Boolean(value));
+}
+
 async function getBusyCompanionIds(companionIds: string[]) {
   if (companionIds.length === 0) return new Set<string>();
   const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
@@ -243,14 +284,12 @@ companionsRouter.get(
       });
 
       let latestProfile: {
-        age: number | null;
+        fullName: string;
+        age: number;
         gender: string | null;
-        religion: string | null;
-        bornCity: string | null;
-        nationality: string | null;
-        school: string | null;
-        college: string | null;
-        qualification: string | null;
+        categories: string[];
+        languagesKnown: string[];
+        servicesOffered: unknown[];
         communicationStyle: string[];
         hobbies: string[];
         aboutYourself: string | null;
@@ -268,14 +307,12 @@ companionsRouter.get(
           },
           orderBy: { createdAt: "desc" },
           select: {
+            fullName: true,
             age: true,
             gender: true,
-            religion: true,
-            bornCity: true,
-            nationality: true,
-            school: true,
-            college: true,
-            qualification: true,
+            categories: true,
+            languagesKnown: true,
+            servicesOffered: true,
             communicationStyle: true,
             hobbies: true,
             aboutYourself: true,
@@ -293,71 +330,146 @@ companionsRouter.get(
         createdAt: Date;
         user: { phoneNumber: string };
       }> = [];
+      let totalPublicReviewCount = 0;
 
       try {
-        publicReviews = await prisma.review.findMany({
-          where: {
-            companionId: companion.id,
-            isApproved: true,
-            isHidden: false,
-          },
-          include: {
-            user: {
-              select: {
-                phoneNumber: true,
+        const [reviews, reviewCount] = await Promise.all([
+          prisma.review.findMany({
+            where: {
+              companionId: companion.id,
+              isApproved: true,
+              isHidden: false,
+            },
+            include: {
+              user: {
+                select: {
+                  phoneNumber: true,
+                },
               },
             },
-          },
-          orderBy: { createdAt: "desc" },
-          take: 8,
-        });
+            orderBy: { createdAt: "desc" },
+            take: 8,
+          }),
+          prisma.review.count({
+            where: {
+              companionId: companion.id,
+              isApproved: true,
+              isHidden: false,
+            },
+          }),
+        ]);
+        publicReviews = reviews;
+        totalPublicReviewCount = reviewCount;
       } catch (error) {
         console.error("[companions.detail] failed to load public reviews", { companionId: companion.id, error });
       }
 
       const isBusy = Boolean(active);
       const { _count } = companion;
+      const fallbackName = cleanText(companion.displayName);
+      const headline = cleanText(companion.tagline) || cleanText(latestProfile?.profileTagline) || "";
+      const bio = cleanText(latestProfile?.aboutYourself);
+      const languages =
+        normalizeStringArray(latestProfile?.languagesKnown).length > 0
+          ? normalizeStringArray(latestProfile?.languagesKnown)
+          : normalizeStringArray(companion.languages);
+      const services =
+        normalizeServiceArray(latestProfile?.servicesOffered).length > 0
+          ? normalizeServiceArray(latestProfile?.servicesOffered)
+          : normalizeServiceArray(companion.servicesOffered as unknown[]);
+      const interests = Array.from(
+        new Set(
+          [
+            ...normalizeStringArray(latestProfile?.categories),
+            ...normalizeStringArray(latestProfile?.communicationStyle),
+            ...normalizeStringArray(latestProfile?.hobbies),
+          ]
+            .map((value) => cleanText(value))
+            .filter(Boolean),
+        ),
+      );
+      const profileImageUrl = sanitizePublicUrl(companion.profileImageUrl ?? latestProfile?.selfieUrl ?? null);
+      const galleryUrls = sanitizePublicUrls(companion.galleryImageUrls);
+      const city = cleanText(companion.city);
+      const reviews = publicReviews
+        .map((review) => ({
+          rating: review.rating,
+          comment: cleanText(review.comment),
+          createdAt: review.createdAt,
+          phoneMasked: maskPhone(review.user.phoneNumber),
+        }))
+        .filter((review) => review.comment.length > 0);
+
       const summary = toPublicCompanionSummary(
         {
           ...companion,
-          languages: normalizeStringArray(companion.languages),
-          galleryImageUrls: normalizeStringArray(companion.galleryImageUrls),
+          languages,
+          galleryImageUrls: galleryUrls,
+          profileImageUrl,
         },
-        latestProfile?.selfieUrl ?? null,
+        profileImageUrl,
         isBusy,
       );
+
+      const publicProfile = {
+        id: companion.id,
+        displayName: fallbackName || cleanText(latestProfile?.fullName) || "Verified Companion",
+        headline,
+        bio,
+        profileImageUrl,
+        galleryUrls,
+        services,
+        interests,
+        languages,
+        city: city || null,
+        serviceArea: city || null,
+        verificationBadges: ["Profile Reviewed", "ID Verified", "Safety Checked", "Behaviour Reviewed"],
+        rating: companion.rating,
+        reviewCount: totalPublicReviewCount,
+        completedSessions: _count.sessions,
+        rates: {
+          chat: companion.chatPrice,
+          audio: companion.audioPrice,
+          video: companion.videoPrice,
+          homeVisit: null,
+        },
+        reviews,
+      };
 
       res.json({
         success: true,
         companion: {
           ...summary,
-          headline: companion.tagline ?? latestProfile?.profileTagline ?? "",
-          tagline: companion.tagline ?? latestProfile?.profileTagline ?? "",
+          displayName: publicProfile.displayName,
+          name: publicProfile.displayName,
+          headline: publicProfile.headline,
+          tagline: publicProfile.headline,
           age: latestProfile?.age ?? null,
-          gender: latestProfile?.gender ?? null,
-          religion: latestProfile?.religion ?? null,
-          bornCity: latestProfile?.bornCity ?? companion.city ?? null,
-          nationality: latestProfile?.nationality ?? null,
-          school: latestProfile?.school ?? null,
-          college: latestProfile?.college ?? null,
-          qualification: latestProfile?.qualification ?? null,
+          gender: cleanText(latestProfile?.gender) || null,
           communicationStyle: normalizeStringArray(latestProfile?.communicationStyle),
           hobbies: normalizeStringArray(latestProfile?.hobbies),
-          interests: normalizeStringArray(latestProfile?.hobbies),
-          about: latestProfile?.aboutYourself ?? null,
-          bio: latestProfile?.aboutYourself ?? null,
-          serviceAreas: companion.city ? [companion.city] : [],
+          interests: publicProfile.interests,
+          about: publicProfile.bio || null,
+          bio: publicProfile.bio || null,
+          services: publicProfile.services,
+          serviceAreas: publicProfile.city ? [publicProfile.city] : [],
+          city: publicProfile.city,
+          languages: publicProfile.languages,
           sessions: _count.sessions,
           sessionsCompleted: _count.sessions,
-          reviewsCount: publicReviews.length,
-          ratingCount: publicReviews.length,
-          reviews: publicReviews.map((review) => ({
-            rating: review.rating,
-            comment: review.comment,
-            createdAt: review.createdAt,
-            phoneMasked: maskPhone(review.user.phoneNumber),
-          })),
+          reviewsCount: totalPublicReviewCount,
+          ratingCount: totalPublicReviewCount,
+          reviews: publicProfile.reviews,
+          verificationBadges: publicProfile.verificationBadges,
+          profileImageUrl: publicProfile.profileImageUrl,
+          galleryImageUrls: publicProfile.galleryUrls,
+          galleryImages: publicProfile.galleryUrls,
+          rates: publicProfile.rates,
+          reviewCount: publicProfile.reviewCount,
+          completedSessions: publicProfile.completedSessions,
+          publicProfile,
         },
+        publicProfile,
       });
     } catch (error) {
       console.error("[companions.detail] failed to load companion profile", { companionId, error });
