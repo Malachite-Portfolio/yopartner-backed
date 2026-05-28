@@ -18,6 +18,7 @@ import { createCode, HttpError } from "../utils/http";
 export const adminRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
+const MAX_MANUAL_WALLET_CREDIT_AMOUNT = 10_000;
 
 adminRouter.use(requireAdminAccess);
 
@@ -111,6 +112,87 @@ adminRouter.get(
       orderBy: { createdAt: "desc" },
     });
     res.json({ users });
+  }),
+);
+
+adminRouter.post(
+  "/users/:userId/wallet/credit",
+  asyncHandler(async (req, res) => {
+    const userId = String(req.params.userId ?? "").trim();
+    if (!userId) throw new HttpError(400, "User ID is required.");
+
+    const parsedAmount =
+      typeof req.body?.amount === "number" ? req.body.amount : Number(req.body?.amount);
+    if (!Number.isFinite(parsedAmount)) {
+      throw new HttpError(400, "amount must be a valid number.");
+    }
+    if (!Number.isInteger(parsedAmount)) {
+      throw new HttpError(400, "amount must be an integer value in rupees.");
+    }
+    if (parsedAmount <= 0) {
+      throw new HttpError(400, "amount must be greater than 0.");
+    }
+    if (parsedAmount > MAX_MANUAL_WALLET_CREDIT_AMOUNT) {
+      throw new HttpError(400, `amount cannot exceed ₹${MAX_MANUAL_WALLET_CREDIT_AMOUNT}.`);
+    }
+
+    const reason =
+      typeof req.body?.reason === "string" && req.body.reason.trim().length > 0
+        ? req.body.reason.trim()
+        : "Admin manual credit";
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        phoneNumber: true,
+      },
+    });
+
+    if (!user) throw new HttpError(404, "User not found.");
+
+    const result = await prisma.$transaction(async (tx) => {
+      const wallet = await tx.walletAccount.upsert({
+        where: { userId: user.id },
+        update: {
+          balance: {
+            increment: parsedAmount,
+          },
+        },
+        create: {
+          userId: user.id,
+          balance: parsedAmount,
+        },
+      });
+
+      const transaction = await tx.walletTransaction.create({
+        data: {
+          transactionCode: createCode("TXN"),
+          walletAccountId: wallet.id,
+          type: TransactionType.ADMIN_CREDIT,
+          amount: parsedAmount,
+          status: TransactionStatus.SUCCESS,
+          gateway: "ADMIN",
+          referenceId: req.authUser?.adminLoginId
+            ? `ADMIN:${req.authUser.adminLoginId}`
+            : `ADMIN:${req.authUser?.id ?? "SYSTEM"}`,
+          reason,
+        },
+      });
+
+      return {
+        wallet,
+        transaction,
+      };
+    });
+
+    res.status(201).json({
+      user,
+      creditedAmount: parsedAmount,
+      updatedBalance: result.wallet.balance,
+      transaction: result.transaction,
+    });
   }),
 );
 
