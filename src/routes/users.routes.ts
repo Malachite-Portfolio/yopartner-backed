@@ -9,6 +9,26 @@ const profileSchema = z.object({
   name: z.string().min(2).optional(),
 });
 
+const profileDetailsSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  email: z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }, z.string().email().max(180).optional()),
+  age: z.coerce.number().int().min(18).max(120),
+  gender: z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }, z.string().max(40).optional()),
+  profileImageUrl: z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }, z.string().url().max(500).optional()),
+});
+
 const supportSchema = z.object({
   subject: z.string().min(3),
   type: z.string().min(2),
@@ -24,6 +44,10 @@ const reviewSchema = z.object({
 
 export const usersRouter = Router();
 
+function isUserProfileComplete(user: { name: string | null; age: number | null }) {
+  return Boolean(user.name && user.name.trim().length >= 2 && typeof user.age === "number" && user.age >= 18);
+}
+
 usersRouter.get(
   "/me",
   requireAuth,
@@ -35,7 +59,7 @@ usersRouter.get(
         walletAccount: true,
       },
     });
-    res.json({ user });
+    res.json({ user, profileComplete: user ? isUserProfileComplete(user) : false });
   }),
 );
 
@@ -52,6 +76,30 @@ usersRouter.patch(
       },
     });
     res.json({ user });
+  }),
+);
+
+usersRouter.patch(
+  "/me/profile",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const body = profileDetailsSchema.parse(req.body);
+    const user = await prisma.user.update({
+      where: { id: authUser.id },
+      data: {
+        name: body.name,
+        email: body.email ?? null,
+        age: body.age,
+        gender: body.gender ?? null,
+        profileImageUrl: body.profileImageUrl ?? null,
+        onboardingCompletedAt: new Date(),
+      },
+      include: {
+        walletAccount: true,
+      },
+    });
+    res.json({ user, profileComplete: isUserProfileComplete(user) });
   }),
 );
 

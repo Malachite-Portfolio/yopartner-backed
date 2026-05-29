@@ -86,6 +86,11 @@ model User {
   firebaseUid    String            @unique
   phoneNumber    String            @unique
   name           String?
+  email          String?
+  age            Int?
+  gender         String?
+  profileImageUrl String?
+  onboardingCompletedAt DateTime?
   role           Role              @default(USER)
   isBlocked      Boolean           @default(false)
   createdAt      DateTime          @default(now())
