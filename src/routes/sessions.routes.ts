@@ -23,22 +23,55 @@ const markLiveSchema = z.object({
 });
 
 const giftCatalog = {
-  rose: { key: "rose", name: "Rose", emoji: "🌹", amount: 10 },
-  coffee: { key: "coffee", name: "Coffee", emoji: "☕", amount: 25 },
-  star: { key: "star", name: "Star", emoji: "⭐", amount: 50 },
-  heart: { key: "heart", name: "Heart", emoji: "💖", amount: 100 },
-  crown: { key: "crown", name: "Crown", emoji: "👑", amount: 250 },
-  diamond: { key: "diamond", name: "Diamond", emoji: "💎", amount: 500 },
+  "gift-001": { key: "gift-001", name: "Rose Bloom", emoji: "\u{1F339}", amount: 10 },
+  "gift-002": { key: "gift-002", name: "Coffee Cheers", emoji: "\u{2615}", amount: 25 },
+  "gift-003": { key: "gift-003", name: "Starlight Spark", emoji: "\u{2B50}", amount: 50 },
+  "gift-004": { key: "gift-004", name: "Heart Beat", emoji: "\u{1F496}", amount: 100 },
+  "gift-005": { key: "gift-005", name: "Warm Hug", emoji: "\u{1F339}", amount: 150 },
+  "gift-006": { key: "gift-006", name: "Lucky Charm", emoji: "\u{2615}", amount: 250 },
+  "gift-007": { key: "gift-007", name: "Sweet Wave", emoji: "\u{2B50}", amount: 10 },
+  "gift-008": { key: "gift-008", name: "Blush Burst", emoji: "\u{1F496}", amount: 25 },
+  "gift-009": { key: "gift-009", name: "Moon Wink", emoji: "\u{1F339}", amount: 50 },
+  "gift-010": { key: "gift-010", name: "Sunshine Pop", emoji: "\u{2615}", amount: 100 },
+  "gift-011": { key: "gift-011", name: "Wish Lantern", emoji: "\u{2B50}", amount: 150 },
+  "gift-012": { key: "gift-012", name: "Golden Smile", emoji: "\u{1F496}", amount: 250 },
+  "gift-013": { key: "gift-013", name: "Happy Pulse", emoji: "\u{1F339}", amount: 10 },
+  "gift-014": { key: "gift-014", name: "Candy Star", emoji: "\u{2615}", amount: 25 },
+  "gift-015": { key: "gift-015", name: "Dream Kiss", emoji: "\u{2B50}", amount: 50 },
+  "gift-016": { key: "gift-016", name: "Royal Aura", emoji: "\u{1F451}", amount: 500 },
+  "gift-017": { key: "gift-017", name: "Crystal Crown", emoji: "\u{1F48E}", amount: 1000 },
+  "gift-018": { key: "gift-018", name: "Mystic Flash", emoji: "\u{1F451}", amount: 500 },
+  "gift-019": { key: "gift-019", name: "Sky Glitter", emoji: "\u{1F48E}", amount: 1000 },
+  "gift-020": { key: "gift-020", name: "Shimmer Path", emoji: "\u{1F451}", amount: 500 },
+  "gift-021": { key: "gift-021", name: "Moon Palace", emoji: "\u{1F48E}", amount: 1000 },
+  "gift-022": { key: "gift-022", name: "Velvet Night", emoji: "\u{1F451}", amount: 500 },
+  "gift-023": { key: "gift-023", name: "Neon Crown", emoji: "\u{1F48E}", amount: 1000 },
+  "gift-024": { key: "gift-024", name: "Star Parade", emoji: "\u{1F451}", amount: 500 },
+  "gift-025": { key: "gift-025", name: "Diamond Rain", emoji: "\u{1F48E}", amount: 1000 },
+  "gift-026": { key: "gift-026", name: "Sapphire Jet", emoji: "\u{1F48E}", amount: 2000 },
+  "gift-027": { key: "gift-027", name: "Platinum Storm", emoji: "\u{1F451}", amount: 5000 },
+  "gift-028": { key: "gift-028", name: "Royal Blizzard", emoji: "\u{1F48E}", amount: 2000 },
+  "gift-029": { key: "gift-029", name: "Eternal Shine", emoji: "\u{1F451}", amount: 5000 },
+  "gift-030": { key: "gift-030", name: "Galaxy Drift", emoji: "\u{1F48E}", amount: 2000 },
+  "gift-031": { key: "gift-031", name: "Ocean Legend", emoji: "\u{1F451}", amount: 5000 },
+  "gift-032": { key: "gift-032", name: "Phoenix Pulse", emoji: "\u{1F48E}", amount: 2000 },
+  "gift-033": { key: "gift-033", name: "Kiss Gift", emoji: "\u{1F48E}", amount: 10000 },
+  "gift-034": { key: "gift-034", name: "Love Ring", emoji: "\u{1F48E}", amount: 12000 },
+  "gift-035": { key: "gift-035", name: "Luxury Purse", emoji: "\u{1F48E}", amount: 15000 },
+  "gift-036": { key: "gift-036", name: "Luxury Watch", emoji: "\u{1F48E}", amount: 18000 },
+  "gift-037": { key: "gift-037", name: "Marry", emoji: "\u{1F48E}", amount: 20000 },
 } as const;
+
+const giftKeys = Object.keys(giftCatalog) as [keyof typeof giftCatalog, ...(keyof typeof giftCatalog)[]];
 
 const giftMessagePrefix = "__YOP_GIFT__:";
 
 const sendGiftSchema = z.object({
-  giftKey: z.enum(["rose", "coffee", "star", "heart", "crown", "diamond"]),
+  giftKey: z.enum(giftKeys),
 });
 
 const giftMessagePayloadSchema = z.object({
-  giftKey: z.enum(["rose", "coffee", "star", "heart", "crown", "diamond"]),
+  giftKey: z.string().min(1).max(64),
   giftName: z.string().min(1),
   giftEmoji: z.string().min(1),
   amount: z.number().int().positive(),
