@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { SessionStatus } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth } from "../middlewares/auth";
 import { asyncHandler } from "../utils/asyncHandler";
@@ -85,6 +86,70 @@ usersRouter.get(
       },
     });
     res.json({ user, profileComplete: user ? isUserProfileComplete(user) : false });
+  }),
+);
+
+usersRouter.get(
+  "/me/profile-summary",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const user = await prisma.user.findUnique({
+      where: { id: authUser.id },
+      select: {
+        id: true,
+        firebaseUid: true,
+        phoneNumber: true,
+        name: true,
+        email: true,
+        age: true,
+        gender: true,
+        profileImageUrl: true,
+        onboardingCompletedAt: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!user) {
+      res.status(404).json({ error: "USER_NOT_FOUND", message: "User not found." });
+      return;
+    }
+
+    const [activeConversations, totalSessions, completedSessions] = await Promise.all([
+      prisma.session.count({
+        where: {
+          userId: authUser.id,
+          status: SessionStatus.LIVE,
+          endedAt: null,
+        },
+      }),
+      prisma.session.count({
+        where: { userId: authUser.id },
+      }),
+      prisma.session.count({
+        where: {
+          userId: authUser.id,
+          status: { in: [SessionStatus.ENDED, SessionStatus.COMPLETED] },
+        },
+      }),
+    ]);
+
+    const profileComplete = isUserProfileComplete(user);
+    res.json({
+      user: {
+        ...user,
+        verificationStatus: profileComplete ? "VERIFIED" : "PENDING_PROFILE",
+      },
+      profileComplete,
+      stats: {
+        activeConversations,
+        totalSessions,
+        completedSessions,
+        memberSince: user.createdAt,
+        lastLogin: null,
+      },
+    });
   }),
 );
 
