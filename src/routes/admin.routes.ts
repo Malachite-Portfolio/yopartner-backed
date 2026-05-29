@@ -1,6 +1,8 @@
 import { Router } from "express";
 import {
   CompanionStatus,
+  PartnerEarningSourceType,
+  PartnerEarningStatus,
   PartnerApplicationStatus,
   PayoutStatus,
   Prisma,
@@ -61,6 +63,12 @@ function parsePaidAmountFromReason(reason: string | null, fallbackAmount: number
   if (!match) return Math.abs(fallbackAmount);
   const parsed = Number(match[1]);
   return Number.isFinite(parsed) ? parsed : Math.abs(fallbackAmount);
+}
+
+function decimalToNumber(value: Prisma.Decimal | number | null | undefined) {
+  if (value == null) return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 adminRouter.get(
@@ -693,11 +701,97 @@ adminRouter.get(
 adminRouter.get(
   "/payouts",
   asyncHandler(async (_req, res) => {
-    const payouts = await prisma.payout.findMany({
-      include: { companion: { include: { user: true } } },
-      orderBy: { createdAt: "desc" },
+    const [payouts, partnerEarnings] = await Promise.all([
+      prisma.payout.findMany({
+        include: { companion: { include: { user: true } } },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.partnerEarning.findMany({
+        include: {
+          companion: {
+            include: {
+              user: {
+                select: {
+                  phoneNumber: true,
+                  name: true,
+                },
+              },
+            },
+          },
+          session: {
+            select: {
+              serviceType: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
+
+    const summary = partnerEarnings.reduce(
+      (acc, row) => {
+        const gross = decimalToNumber(row.grossAmount);
+        const partnerAmount = decimalToNumber(row.partnerAmount);
+        const companyAmount = decimalToNumber(row.companyAmount);
+        const isSession = row.sourceType === PartnerEarningSourceType.SESSION;
+        const isGift = row.sourceType === PartnerEarningSourceType.GIFT;
+        const isPending = row.status === PartnerEarningStatus.PENDING;
+        const isAvailable = row.status === PartnerEarningStatus.AVAILABLE;
+        const isPaid = row.status === PartnerEarningStatus.PAID;
+
+        acc.grossTotal += gross;
+        acc.partnerTotal += partnerAmount;
+        acc.companyTotal += companyAmount;
+        if (isSession) {
+          acc.sessionGross += gross;
+          acc.sessionPartner += partnerAmount;
+          acc.sessionCompany += companyAmount;
+        }
+        if (isGift) {
+          acc.giftGross += gross;
+          acc.giftPartner += partnerAmount;
+          acc.giftCompany += companyAmount;
+        }
+        if (isPending) acc.pendingPartner += partnerAmount;
+        if (isAvailable) acc.availablePartner += partnerAmount;
+        if (isPaid) acc.paidPartner += partnerAmount;
+        return acc;
+      },
+      {
+        grossTotal: 0,
+        partnerTotal: 0,
+        companyTotal: 0,
+        sessionGross: 0,
+        sessionPartner: 0,
+        sessionCompany: 0,
+        giftGross: 0,
+        giftPartner: 0,
+        giftCompany: 0,
+        pendingPartner: 0,
+        availablePartner: 0,
+        paidPartner: 0,
+      },
+    );
+
+    res.json({
+      payouts,
+      earnings: partnerEarnings.map((row) => ({
+        id: row.id,
+        createdAt: row.createdAt.toISOString(),
+        sourceType: row.sourceType,
+        status: row.status,
+        companionId: row.companionId,
+        companionName: row.companion.displayName,
+        companionPhone: row.companion.user.phoneNumber,
+        sessionType: row.session?.serviceType ?? null,
+        grossAmount: decimalToNumber(row.grossAmount),
+        partnerAmount: decimalToNumber(row.partnerAmount),
+        companyAmount: decimalToNumber(row.companyAmount),
+        partnerPercent: decimalToNumber(row.partnerPercent),
+        companyPercent: decimalToNumber(row.companyPercent),
+      })),
+      summary,
     });
-    res.json({ payouts });
   }),
 );
 

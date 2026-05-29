@@ -1,5 +1,14 @@
 import { Router } from "express";
-import { CompanionStatus, Prisma, Role, ServiceType, SessionStatus, VerificationStatus } from "@prisma/client";
+import {
+  CompanionStatus,
+  PartnerEarningSourceType,
+  PartnerEarningStatus,
+  Prisma,
+  Role,
+  ServiceType,
+  SessionStatus,
+  VerificationStatus,
+} from "@prisma/client";
 import type { DecodedIdToken } from "firebase-admin/auth";
 import { z, ZodError } from "zod";
 import { requireAuth } from "../middlewares/auth";
@@ -90,6 +99,12 @@ function maskPhoneNumber(value: string) {
 
 function buildChannelName(sessionId: string) {
   return `session-${sessionId}`;
+}
+
+function decimalToNumber(value: Prisma.Decimal | number | null | undefined) {
+  if (value == null) return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 const toServiceType = (value: string): ServiceType | null => {
@@ -382,7 +397,7 @@ partnerRouter.get(
         },
       });
 
-      const [todaySessions, liveSessions, requestSessions] = await Promise.all([
+      const [todaySessions, liveSessions, requestSessions, earningsTodayAgg] = await Promise.all([
         prisma.session.findMany({
           where: {
             companionId: companion.id,
@@ -412,12 +427,20 @@ partnerRouter.get(
           include: { user: true },
           orderBy: { createdAt: "desc" },
         }),
+        prisma.partnerEarning.aggregate({
+          where: {
+            companionId: companion.id,
+            createdAt: { gte: startOfDay, lte: endOfDay },
+            status: { in: [PartnerEarningStatus.PENDING, PartnerEarningStatus.AVAILABLE, PartnerEarningStatus.PAID] },
+          },
+          _sum: { partnerAmount: true },
+        }),
       ]);
 
       const supportedToday = new Set(todaySessions.map((session) => session.userId)).size;
       const audioConversations = todaySessions.filter((session) => session.serviceType === ServiceType.AUDIO).length;
       const videoConversations = todaySessions.filter((session) => session.serviceType === ServiceType.VIDEO).length;
-      const earningsToday = todaySessions.reduce((sum, session) => sum + Math.max(session.companionEarning, 0), 0);
+      const earningsToday = decimalToNumber(earningsTodayAgg._sum.partnerAmount);
 
       stats = {
         peopleSupportedToday: supportedToday,
@@ -1142,16 +1165,39 @@ partnerRouter.get(
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
     if (!companion) {
-      res.json({ earnings: [], payouts: [] });
+      res.json({
+        earnings: [],
+        payouts: [],
+        summary: {
+          grossTotal: 0,
+          partnerTotal: 0,
+          companyTotal: 0,
+          sessionEarnings: 0,
+          giftEarnings: 0,
+          sessionGross: 0,
+          giftGross: 0,
+          pendingAmount: 0,
+          availableAmount: 0,
+          paidAmount: 0,
+        },
+      });
       return;
     }
-    const [sessions, payouts] = await Promise.all([
-      prisma.session.findMany({
-        where: {
-          companionId: companion.id,
-          status: SessionStatus.ENDED,
+    const [partnerEarnings, payouts] = await Promise.all([
+      prisma.partnerEarning.findMany({
+        where: { companionId: companion.id },
+        include: {
+          user: {
+            select: {
+              phoneNumber: true,
+            },
+          },
+          session: {
+            select: {
+              serviceType: true,
+            },
+          },
         },
-        include: { user: true },
         orderBy: { createdAt: "desc" },
       }),
       prisma.payout.findMany({
@@ -1160,18 +1206,62 @@ partnerRouter.get(
       }),
     ]);
 
+    const summary = partnerEarnings.reduce(
+      (acc, row) => {
+        const gross = decimalToNumber(row.grossAmount);
+        const partnerAmount = decimalToNumber(row.partnerAmount);
+        const companyAmount = decimalToNumber(row.companyAmount);
+        const isSession = row.sourceType === PartnerEarningSourceType.SESSION;
+        const isPending = row.status === PartnerEarningStatus.PENDING;
+        const isAvailable = row.status === PartnerEarningStatus.AVAILABLE;
+        const isPaid = row.status === PartnerEarningStatus.PAID;
+
+        acc.grossTotal += gross;
+        acc.partnerTotal += partnerAmount;
+        acc.companyTotal += companyAmount;
+        if (isSession) {
+          acc.sessionEarnings += partnerAmount;
+          acc.sessionGross += gross;
+        } else {
+          acc.giftEarnings += partnerAmount;
+          acc.giftGross += gross;
+        }
+        if (isPending) acc.pendingAmount += partnerAmount;
+        if (isAvailable) acc.availableAmount += partnerAmount;
+        if (isPaid) acc.paidAmount += partnerAmount;
+        return acc;
+      },
+      {
+        grossTotal: 0,
+        partnerTotal: 0,
+        companyTotal: 0,
+        sessionEarnings: 0,
+        giftEarnings: 0,
+        sessionGross: 0,
+        giftGross: 0,
+        pendingAmount: 0,
+        availableAmount: 0,
+        paidAmount: 0,
+      },
+    );
+
     res.json({
-      earnings: sessions.map((session) => ({
-        id: session.id,
-        date: session.createdAt.toISOString(),
-        session: session.serviceType,
-        userMaskedPhone: session.user.phoneNumber,
-        amount: session.amount,
-        platformFee: session.platformFee,
-        netEarning: session.companionEarning,
-        status: "Credited",
+      earnings: partnerEarnings.map((row) => ({
+        id: row.id,
+        date: row.createdAt.toISOString(),
+        sourceType: row.sourceType,
+        session: row.sourceType === PartnerEarningSourceType.SESSION ? (row.session?.serviceType ?? "SESSION") : "GIFT",
+        userMaskedPhone: maskPhoneNumber(row.user.phoneNumber),
+        amount: decimalToNumber(row.grossAmount),
+        platformFee: decimalToNumber(row.companyAmount),
+        netEarning: decimalToNumber(row.partnerAmount),
+        partnerPercent: decimalToNumber(row.partnerPercent),
+        companyPercent: decimalToNumber(row.companyPercent),
+        companyShare: decimalToNumber(row.companyAmount),
+        status: row.status,
       })),
       payouts,
+      summary,
     });
   }),
 );

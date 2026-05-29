@@ -1,5 +1,14 @@
 import { Router } from "express";
-import { CompanionStatus, ServiceType, SessionStatus, TransactionStatus, TransactionType, VerificationStatus } from "@prisma/client";
+import {
+  CompanionStatus,
+  PartnerEarningSourceType,
+  PartnerEarningStatus,
+  ServiceType,
+  SessionStatus,
+  TransactionStatus,
+  TransactionType,
+  VerificationStatus,
+} from "@prisma/client";
 import { RtcRole, RtcTokenBuilder } from "agora-token";
 import { z } from "zod";
 import { requireAuth } from "../middlewares/auth";
@@ -82,6 +91,23 @@ const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
 const MIN_CHAT_WALLET_BALANCE = 50;
+
+function roundToTwo(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function splitAmount(grossAmount: number, partnerPercent: number, companyPercent: number) {
+  const gross = roundToTwo(Math.max(0, grossAmount));
+  const partner = roundToTwo((gross * partnerPercent) / 100);
+  const company = roundToTwo(gross - partner);
+  return {
+    grossAmount: gross,
+    partnerAmount: partner,
+    companyAmount: company,
+    partnerPercent,
+    companyPercent,
+  };
+}
 
 function buildGiftMessageBody(gift: {
   key: keyof typeof giftCatalog;
@@ -473,7 +499,7 @@ sessionsRouter.post(
       });
       if (!updatedWallet) throw new HttpError(404, "Wallet account not found.");
 
-      await tx.walletTransaction.create({
+      const giftTransaction = await tx.walletTransaction.create({
         data: {
           transactionCode: createCode("TXN"),
           walletAccountId: wallet.id,
@@ -483,6 +509,23 @@ sessionsRouter.post(
           gateway: "WALLET",
           referenceId: session.id,
           reason: `Gift ${gift.name} sent in session ${session.sessionCode}`,
+        },
+      });
+
+      const giftSplit = splitAmount(gift.amount, 40, 60);
+      await tx.partnerEarning.create({
+        data: {
+          companionId: session.companionId,
+          userId: authUser.id,
+          sessionId: session.id,
+          walletTransactionId: giftTransaction.id,
+          sourceType: PartnerEarningSourceType.GIFT,
+          grossAmount: giftSplit.grossAmount,
+          partnerAmount: giftSplit.partnerAmount,
+          companyAmount: giftSplit.companyAmount,
+          partnerPercent: giftSplit.partnerPercent,
+          companyPercent: giftSplit.companyPercent,
+          status: PartnerEarningStatus.AVAILABLE,
         },
       });
 
@@ -793,19 +836,52 @@ const endSessionHandler = asyncHandler(async (req, res) => {
   const durationSeconds = session.startedAt
     ? Math.max(1, Math.floor((now.getTime() - session.startedAt.getTime()) / 1000))
     : session.durationSeconds;
-  const companionEarning = Math.max(0, Math.floor(session.amount * 0.8));
+  const sessionSplit = splitAmount(session.amount, 30, 70);
+  const companionEarning = Math.max(0, Math.round(sessionSplit.partnerAmount));
   const platformFee = session.amount - companionEarning;
 
-  const updated = await prisma.session.update({
-    where: { id: session.id },
-    data: {
-      status: SessionStatus.ENDED,
-      endedAt: now,
-      endedByUserId: authUser.id,
-      durationSeconds,
-      companionEarning,
-      platformFee,
-    },
+  const updated = await prisma.$transaction(async (tx) => {
+    const next = await tx.session.update({
+      where: { id: session.id },
+      data: {
+        status: SessionStatus.ENDED,
+        endedAt: now,
+        endedByUserId: authUser.id,
+        durationSeconds,
+        companionEarning,
+        platformFee,
+      },
+    });
+
+    await tx.partnerEarning.upsert({
+      where: {
+        sourceType_sessionId: {
+          sourceType: PartnerEarningSourceType.SESSION,
+          sessionId: session.id,
+        },
+      },
+      create: {
+        companionId: session.companionId,
+        userId: session.userId,
+        sessionId: session.id,
+        sourceType: PartnerEarningSourceType.SESSION,
+        grossAmount: sessionSplit.grossAmount,
+        partnerAmount: sessionSplit.partnerAmount,
+        companyAmount: sessionSplit.companyAmount,
+        partnerPercent: sessionSplit.partnerPercent,
+        companyPercent: sessionSplit.companyPercent,
+        status: PartnerEarningStatus.AVAILABLE,
+      },
+      update: {
+        grossAmount: sessionSplit.grossAmount,
+        partnerAmount: sessionSplit.partnerAmount,
+        companyAmount: sessionSplit.companyAmount,
+        partnerPercent: sessionSplit.partnerPercent,
+        companyPercent: sessionSplit.companyPercent,
+      },
+    });
+
+    return next;
   });
 
   res.json({ session: toSessionResponse(updated, authUser.id) });

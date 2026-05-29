@@ -74,6 +74,18 @@ enum PayoutStatus {
   REJECTED
 }
 
+enum PartnerEarningSourceType {
+  SESSION
+  GIFT
+}
+
+enum PartnerEarningStatus {
+  PENDING
+  AVAILABLE
+  PAID
+  CANCELLED
+}
+
 enum VerificationStatus {
   PENDING
   VERIFIED
@@ -103,6 +115,7 @@ model User {
   sentMessages   ChatMessage[]     @relation("ChatMessageSender")
   reviews        Review[]          @relation("UserReviews")
   supportTickets SupportTicket[]
+  partnerEarnings PartnerEarning[]
 }
 
 model Companion {
@@ -132,6 +145,7 @@ model Companion {
   sessions            Session[]              @relation("CompanionSessions")
   partnerApplications PartnerApplication[]
   payouts             Payout[]
+  partnerEarnings     PartnerEarning[]
   reviews             Review[]               @relation("CompanionReviews")
   verificationRecord  VerificationRecord?
 }
@@ -228,6 +242,7 @@ model Session {
   safetyNote       String?
   messages         ChatMessage[]
   review           Review?
+  partnerEarnings  PartnerEarning[]
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 }
@@ -267,7 +282,35 @@ model WalletTransaction {
   gateway          String?
   referenceId      String?
   reason           String?
+  partnerEarnings  PartnerEarning[]
   createdAt        DateTime          @default(now())
+}
+
+model PartnerEarning {
+  id                String                   @id @default(cuid())
+  companionId       String
+  companion         Companion                @relation(fields: [companionId], references: [id], onDelete: Cascade)
+  userId            String
+  user              User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId         String?
+  session           Session?                 @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  walletTransactionId String?
+  walletTransaction WalletTransaction?       @relation(fields: [walletTransactionId], references: [id], onDelete: SetNull)
+  sourceType        PartnerEarningSourceType
+  grossAmount       Decimal                  @db.Decimal(12, 2)
+  partnerAmount     Decimal                  @db.Decimal(12, 2)
+  companyAmount     Decimal                  @db.Decimal(12, 2)
+  partnerPercent    Decimal                  @db.Decimal(5, 2)
+  companyPercent    Decimal                  @db.Decimal(5, 2)
+  status            PartnerEarningStatus     @default(PENDING)
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  @@index([companionId, createdAt])
+  @@index([sourceType, createdAt])
+  @@index([status, createdAt])
+  @@unique([sourceType, sessionId])
+  @@unique([walletTransactionId])
 }
 
 model Payout {
