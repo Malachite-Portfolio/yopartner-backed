@@ -9,24 +9,38 @@ const profileSchema = z.object({
   name: z.string().min(2).optional(),
 });
 
+const SAFE_PROFILE_IMAGE_HOSTS = new Set([
+  "firebasestorage.googleapis.com",
+  "storage.googleapis.com",
+]);
+
+function isSafeProfileImageUrl(value: string) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && SAFE_PROFILE_IMAGE_HOSTS.has(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 const profileDetailsSchema = z.object({
   name: z.string().trim().min(2).max(80),
-  email: z.preprocess((value) => {
-    if (typeof value !== "string") return value;
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
-  }, z.string().email().max(180).optional()),
+  email: z.string().trim().min(1).email().max(180),
   age: z.coerce.number().int().min(18).max(120),
   gender: z.preprocess((value) => {
     if (typeof value !== "string") return value;
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : undefined;
   }, z.string().max(40).optional()),
-  profileImageUrl: z.preprocess((value) => {
-    if (typeof value !== "string") return value;
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
-  }, z.string().url().max(500).optional()),
+  profileImageUrl: z
+    .string()
+    .trim()
+    .min(1)
+    .url()
+    .max(500)
+    .refine((value) => isSafeProfileImageUrl(value), {
+      message: "Profile image must be a secure supported storage URL.",
+    }),
 });
 
 const supportSchema = z.object({
@@ -44,8 +58,19 @@ const reviewSchema = z.object({
 
 export const usersRouter = Router();
 
-function isUserProfileComplete(user: { name: string | null; age: number | null }) {
-  return Boolean(user.name && user.name.trim().length >= 2 && typeof user.age === "number" && user.age >= 18);
+function isUserProfileComplete(user: {
+  name: string | null;
+  email: string | null;
+  age: number | null;
+  profileImageUrl: string | null;
+}) {
+  const hasName = Boolean(user.name && user.name.trim().length >= 2);
+  const hasEmail = Boolean(user.email && z.string().email().safeParse(user.email).success);
+  const hasAge = typeof user.age === "number" && user.age >= 18;
+  const hasSafeProfileImage = Boolean(
+    user.profileImageUrl && isSafeProfileImageUrl(user.profileImageUrl),
+  );
+  return hasName && hasEmail && hasAge && hasSafeProfileImage;
 }
 
 usersRouter.get(
@@ -89,10 +114,10 @@ usersRouter.patch(
       where: { id: authUser.id },
       data: {
         name: body.name,
-        email: body.email ?? null,
+        email: body.email,
         age: body.age,
         gender: body.gender ?? null,
-        profileImageUrl: body.profileImageUrl ?? null,
+        profileImageUrl: body.profileImageUrl,
         onboardingCompletedAt: new Date(),
       },
       include: {
