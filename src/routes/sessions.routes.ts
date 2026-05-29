@@ -71,12 +71,10 @@ const giftCatalog = {
   "gift-037": { key: "gift-037", name: "Marry", emoji: "\u{1F48E}", amount: 20000 },
 } as const;
 
-const giftKeys = Object.keys(giftCatalog) as [keyof typeof giftCatalog, ...(keyof typeof giftCatalog)[]];
-
 const giftMessagePrefix = "__YOP_GIFT__:";
 
 const sendGiftSchema = z.object({
-  giftKey: z.enum(giftKeys),
+  giftKey: z.string().trim().min(1).max(64),
 });
 
 const giftMessagePayloadSchema = z.object({
@@ -121,6 +119,12 @@ function buildGiftMessageBody(gift: {
     giftEmoji: gift.emoji,
     amount: gift.amount,
   })}`;
+}
+
+function getGiftByKey(giftKey: string) {
+  if (!giftKey) return null;
+  if (!Object.prototype.hasOwnProperty.call(giftCatalog, giftKey)) return null;
+  return giftCatalog[giftKey as keyof typeof giftCatalog];
 }
 
 function parseGiftMessageBody(body: string) {
@@ -459,112 +463,221 @@ sessionsRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const session = await findSessionForActor(String(req.params.id), authUser.id);
+    const sessionId = String(req.params.id);
+    const payloadResult = sendGiftSchema.safeParse(req.body ?? {});
+    const requestedGiftKey = payloadResult.success ? payloadResult.data.giftKey : "";
+
+    console.info("[sessions:gifts] request", {
+      sessionId,
+      userId: authUser.id,
+      giftKey: requestedGiftKey || null,
+    });
+
+    if (!payloadResult.success) {
+      console.warn("[sessions:gifts] invalid payload", {
+        sessionId,
+        userId: authUser.id,
+        issues: payloadResult.error.issues.map((issue) => issue.message),
+      });
+      res.status(400).json({
+        error: "INVALID_GIFT",
+        message: "Invalid gift selected.",
+      });
+      return;
+    }
+
+    const gift = getGiftByKey(payloadResult.data.giftKey);
+    console.info("[sessions:gifts] catalog lookup", {
+      sessionId,
+      userId: authUser.id,
+      giftKey: payloadResult.data.giftKey,
+      found: Boolean(gift),
+      giftName: gift?.name ?? null,
+      amount: gift?.amount ?? null,
+    });
+    if (!gift) {
+      res.status(400).json({
+        error: "INVALID_GIFT",
+        message: "Invalid gift selected.",
+      });
+      return;
+    }
+
+    const session = await findSessionForActor(sessionId, authUser.id);
     if (!session) throw new HttpError(404, "Session not found.");
     if (session.serviceType !== ServiceType.CHAT || session.status !== SessionStatus.LIVE) {
-      throw new HttpError(400, "Gifts can only be sent in active chat sessions.");
+      res.status(400).json({
+        error: "SESSION_NOT_LIVE",
+        message: "Gifts can only be sent during an active chat.",
+      });
+      return;
     }
     if (session.userId !== authUser.id) {
       throw new HttpError(403, "Only users can send gifts in this session.");
     }
-
-    const payload = sendGiftSchema.parse(req.body);
-    const gift = giftCatalog[payload.giftKey];
-    if (!gift) throw new HttpError(400, "Invalid gift selection.");
-
-    const result = await prisma.$transaction(async (tx) => {
-      const wallet = await tx.walletAccount.upsert({
-        where: { userId: authUser.id },
-        update: {},
-        create: { userId: authUser.id },
-      });
-
-      const debited = await tx.walletAccount.updateMany({
-        where: {
-          id: wallet.id,
-          balance: { gte: gift.amount },
-        },
-        data: {
-          balance: { decrement: gift.amount },
-        },
-      });
-
-      if (debited.count === 0) {
-        return { insufficientBalance: true as const };
-      }
-
-      const updatedWallet = await tx.walletAccount.findUnique({
-        where: { id: wallet.id },
-        select: { balance: true },
-      });
-      if (!updatedWallet) throw new HttpError(404, "Wallet account not found.");
-
-      const giftTransaction = await tx.walletTransaction.create({
-        data: {
-          transactionCode: createCode("TXN"),
-          walletAccountId: wallet.id,
-          type: TransactionType.GIFT,
-          amount: -gift.amount,
-          status: TransactionStatus.SUCCESS,
-          gateway: "WALLET",
-          referenceId: session.id,
-          reason: `Gift ${gift.name} sent in session ${session.sessionCode}`,
-        },
-      });
-
-      const giftSplit = splitAmount(gift.amount, 40, 60);
-      await tx.partnerEarning.create({
-        data: {
-          companionId: session.companionId,
-          userId: authUser.id,
-          sessionId: session.id,
-          walletTransactionId: giftTransaction.id,
-          sourceType: PartnerEarningSourceType.GIFT,
-          grossAmount: giftSplit.grossAmount,
-          partnerAmount: giftSplit.partnerAmount,
-          companyAmount: giftSplit.companyAmount,
-          partnerPercent: giftSplit.partnerPercent,
-          companyPercent: giftSplit.companyPercent,
-          status: PartnerEarningStatus.AVAILABLE,
-        },
-      });
-
-      const createdMessage = await tx.chatMessage.create({
-        data: {
-          sessionId: session.id,
-          senderUserId: authUser.id,
-          body: buildGiftMessageBody({
-            key: gift.key,
-            name: gift.name,
-            emoji: gift.emoji,
-            amount: gift.amount,
-          }),
-        },
-        include: {
-          senderUser: {
-            select: {
-              id: true,
-              phoneNumber: true,
-              name: true,
-            },
-          },
-        },
-      });
-
-      return {
-        insufficientBalance: false as const,
-        walletBalance: updatedWallet.balance,
-        message: createdMessage,
-      };
-    });
-
-    if (result.insufficientBalance) {
-      res.status(402).json({
-        error: "INSUFFICIENT_WALLET_BALANCE",
-        message: "Minimum wallet balance is not enough for this gift.",
+    if (!session.companionId) {
+      res.status(404).json({
+        error: "PARTNER_NOT_FOUND",
+        message: "Partner unavailable.",
       });
       return;
     }
+
+    let result:
+      | {
+          insufficientBalance: true;
+          walletBalance: number;
+          walletDebitedCount: number;
+        }
+      | {
+          insufficientBalance: false;
+          walletBalance: number;
+          walletDebitedCount: number;
+          message: Awaited<ReturnType<typeof prisma.chatMessage.create>>;
+        };
+    try {
+      result = await prisma.$transaction(async (tx) => {
+        const wallet = await tx.walletAccount.upsert({
+          where: { userId: authUser.id },
+          update: {},
+          create: { userId: authUser.id },
+        });
+
+        const debited = await tx.walletAccount.updateMany({
+          where: {
+            id: wallet.id,
+            balance: { gte: gift.amount },
+          },
+          data: {
+            balance: { decrement: gift.amount },
+          },
+        });
+
+        if (debited.count === 0) {
+          console.info("[sessions:gifts] wallet debit blocked", {
+            sessionId,
+            userId: authUser.id,
+            giftKey: gift.key,
+            walletId: wallet.id,
+            walletBalance: wallet.balance,
+            giftAmount: gift.amount,
+            debitCount: debited.count,
+          });
+          return {
+            insufficientBalance: true as const,
+            walletBalance: wallet.balance,
+            walletDebitedCount: debited.count,
+          };
+        }
+
+        const updatedWallet = await tx.walletAccount.findUnique({
+          where: { id: wallet.id },
+          select: { balance: true },
+        });
+        if (!updatedWallet) throw new HttpError(404, "Wallet account not found.");
+
+        const giftTransaction = await tx.walletTransaction.create({
+          data: {
+            transactionCode: createCode("TXN"),
+            walletAccountId: wallet.id,
+            type: TransactionType.GIFT,
+            amount: -gift.amount,
+            status: TransactionStatus.SUCCESS,
+            gateway: "WALLET",
+            referenceId: session.id,
+            reason: `Gift ${gift.name} sent in session ${session.sessionCode}`,
+          },
+        });
+
+        const giftSplit = splitAmount(gift.amount, 40, 60);
+        await tx.partnerEarning.upsert({
+          where: {
+            walletTransactionId: giftTransaction.id,
+          },
+          create: {
+            companionId: session.companionId,
+            userId: authUser.id,
+            // Use wallet transaction as idempotency key for gifts to avoid session-level unique collisions.
+            sessionId: null,
+            walletTransactionId: giftTransaction.id,
+            sourceType: PartnerEarningSourceType.GIFT,
+            grossAmount: giftSplit.grossAmount,
+            partnerAmount: giftSplit.partnerAmount,
+            companyAmount: giftSplit.companyAmount,
+            partnerPercent: giftSplit.partnerPercent,
+            companyPercent: giftSplit.companyPercent,
+            status: PartnerEarningStatus.AVAILABLE,
+          },
+          update: {
+            companionId: session.companionId,
+            userId: authUser.id,
+            sourceType: PartnerEarningSourceType.GIFT,
+            grossAmount: giftSplit.grossAmount,
+            partnerAmount: giftSplit.partnerAmount,
+            companyAmount: giftSplit.companyAmount,
+            partnerPercent: giftSplit.partnerPercent,
+            companyPercent: giftSplit.companyPercent,
+            status: PartnerEarningStatus.AVAILABLE,
+          },
+        });
+
+        const createdMessage = await tx.chatMessage.create({
+          data: {
+            sessionId: session.id,
+            senderUserId: authUser.id,
+            body: buildGiftMessageBody({
+              key: gift.key,
+              name: gift.name,
+              emoji: gift.emoji,
+              amount: gift.amount,
+            }),
+          },
+          include: {
+            senderUser: {
+              select: {
+                id: true,
+                phoneNumber: true,
+                name: true,
+              },
+            },
+          },
+        });
+
+        return {
+          insufficientBalance: false as const,
+          walletBalance: updatedWallet.balance,
+          walletDebitedCount: debited.count,
+          message: createdMessage,
+        };
+      });
+    } catch (error) {
+      console.error("[sessions:gifts] failed", {
+        sessionId,
+        userId: authUser.id,
+        giftKey: gift.key,
+        giftName: gift.name,
+        giftAmount: gift.amount,
+        error,
+      });
+      throw error;
+    }
+
+    if (result.insufficientBalance) {
+      res.status(402).json({
+        error: "INSUFFICIENT_BALANCE",
+        message: "You don't have enough wallet balance.",
+      });
+      return;
+    }
+
+    console.info("[sessions:gifts] success", {
+      sessionId,
+      userId: authUser.id,
+      giftKey: gift.key,
+      giftName: gift.name,
+      walletDebitedCount: result.walletDebitedCount,
+      walletBalance: result.walletBalance,
+    });
 
     res.status(201).json({
       walletBalance: result.walletBalance,
