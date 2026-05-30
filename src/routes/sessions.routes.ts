@@ -313,7 +313,8 @@ function toSessionResponse(session: {
     user: session.user
       ? {
           id: (session.user as { id: string }).id,
-          name: (session.user as { name?: string | null }).name ?? "Member",
+          name: (session.user as { name?: string | null }).name ?? null,
+          fullName: (session.user as { fullName?: string | null }).fullName ?? null,
           phoneMasked: maskPhoneNumber((session.user as { phoneNumber: string }).phoneNumber),
         }
       : null,

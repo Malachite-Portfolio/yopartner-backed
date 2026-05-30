@@ -1163,22 +1163,20 @@ partnerRouter.get(
   requireRole([Role.PARTNER, Role.ADMIN]),
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
+    const isAdmin = authUser.role === Role.ADMIN;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
     if (!companion) {
       res.json({
         earnings: [],
         payouts: [],
         summary: {
-          grossTotal: 0,
-          partnerTotal: 0,
-          companyTotal: 0,
+          totalEarnings: 0,
           sessionEarnings: 0,
           giftEarnings: 0,
-          sessionGross: 0,
-          giftGross: 0,
           pendingAmount: 0,
-          availableAmount: 0,
+          availableBalance: 0,
           paidAmount: 0,
+          ...(isAdmin ? { companyTotal: 0 } : {}),
         },
       });
       return;
@@ -1189,6 +1187,7 @@ partnerRouter.get(
         include: {
           user: {
             select: {
+              name: true,
               phoneNumber: true,
             },
           },
@@ -1216,31 +1215,25 @@ partnerRouter.get(
         const isAvailable = row.status === PartnerEarningStatus.AVAILABLE;
         const isPaid = row.status === PartnerEarningStatus.PAID;
 
-        acc.grossTotal += gross;
-        acc.partnerTotal += partnerAmount;
+        acc.totalEarnings += partnerAmount;
         acc.companyTotal += companyAmount;
         if (isSession) {
           acc.sessionEarnings += partnerAmount;
-          acc.sessionGross += gross;
         } else {
           acc.giftEarnings += partnerAmount;
-          acc.giftGross += gross;
         }
         if (isPending) acc.pendingAmount += partnerAmount;
-        if (isAvailable) acc.availableAmount += partnerAmount;
+        if (isAvailable) acc.availableBalance += partnerAmount;
         if (isPaid) acc.paidAmount += partnerAmount;
         return acc;
       },
       {
-        grossTotal: 0,
-        partnerTotal: 0,
+        totalEarnings: 0,
         companyTotal: 0,
         sessionEarnings: 0,
         giftEarnings: 0,
-        sessionGross: 0,
-        giftGross: 0,
         pendingAmount: 0,
-        availableAmount: 0,
+        availableBalance: 0,
         paidAmount: 0,
       },
     );
@@ -1250,18 +1243,33 @@ partnerRouter.get(
         id: row.id,
         date: row.createdAt.toISOString(),
         sourceType: row.sourceType,
-        session: row.sourceType === PartnerEarningSourceType.SESSION ? (row.session?.serviceType ?? "SESSION") : "GIFT",
-        userMaskedPhone: maskPhoneNumber(row.user.phoneNumber),
-        amount: decimalToNumber(row.grossAmount),
-        platformFee: decimalToNumber(row.companyAmount),
-        netEarning: decimalToNumber(row.partnerAmount),
-        partnerPercent: decimalToNumber(row.partnerPercent),
-        companyPercent: decimalToNumber(row.companyPercent),
-        companyShare: decimalToNumber(row.companyAmount),
+        source: row.sourceType === PartnerEarningSourceType.SESSION ? (row.session?.serviceType ?? "SESSION") : "GIFT",
+        user: row.user.name?.trim() || maskPhoneNumber(row.user.phoneNumber),
+        grossAmount: decimalToNumber(row.grossAmount),
+        myEarnings: decimalToNumber(row.partnerAmount),
         status: row.status,
+        ...(isAdmin
+          ? {
+              companyAmount: decimalToNumber(row.companyAmount),
+              partnerPercent: decimalToNumber(row.partnerPercent),
+              companyPercent: decimalToNumber(row.companyPercent),
+            }
+          : {}),
       })),
       payouts,
-      summary,
+      summary: isAdmin
+        ? {
+            ...summary,
+            companyTotal: summary.companyTotal,
+          }
+        : {
+            totalEarnings: summary.totalEarnings,
+            sessionEarnings: summary.sessionEarnings,
+            giftEarnings: summary.giftEarnings,
+            availableBalance: summary.availableBalance,
+            pendingAmount: summary.pendingAmount,
+            paidAmount: summary.paidAmount,
+          },
     });
   }),
 );
