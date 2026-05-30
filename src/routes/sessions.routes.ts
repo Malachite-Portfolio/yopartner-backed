@@ -31,50 +31,72 @@ const markLiveSchema = z.object({
   mediaReady: z.boolean().optional(),
 });
 
-const giftCatalog = {
-  "gift-001": { key: "gift-001", name: "Rose Bloom", emoji: "\u{1F339}", amount: 10 },
-  "gift-002": { key: "gift-002", name: "Coffee Cheers", emoji: "\u{2615}", amount: 25 },
-  "gift-003": { key: "gift-003", name: "Starlight Spark", emoji: "\u{2B50}", amount: 50 },
-  "gift-004": { key: "gift-004", name: "Heart Beat", emoji: "\u{1F496}", amount: 100 },
-  "gift-005": { key: "gift-005", name: "Warm Hug", emoji: "\u{1F339}", amount: 150 },
-  "gift-006": { key: "gift-006", name: "Lucky Charm", emoji: "\u{2615}", amount: 250 },
-  "gift-007": { key: "gift-007", name: "Sweet Wave", emoji: "\u{2B50}", amount: 10 },
-  "gift-008": { key: "gift-008", name: "Blush Burst", emoji: "\u{1F496}", amount: 25 },
-  "gift-009": { key: "gift-009", name: "Moon Wink", emoji: "\u{1F339}", amount: 50 },
-  "gift-010": { key: "gift-010", name: "Sunshine Pop", emoji: "\u{2615}", amount: 100 },
-  "gift-011": { key: "gift-011", name: "Wish Lantern", emoji: "\u{2B50}", amount: 150 },
-  "gift-012": { key: "gift-012", name: "Golden Smile", emoji: "\u{1F496}", amount: 250 },
-  "gift-013": { key: "gift-013", name: "Happy Pulse", emoji: "\u{1F339}", amount: 10 },
-  "gift-014": { key: "gift-014", name: "Candy Star", emoji: "\u{2615}", amount: 25 },
-  "gift-015": { key: "gift-015", name: "Dream Kiss", emoji: "\u{2B50}", amount: 50 },
-  "gift-016": { key: "gift-016", name: "Royal Aura", emoji: "\u{1F451}", amount: 500 },
-  "gift-017": { key: "gift-017", name: "Crystal Crown", emoji: "\u{1F48E}", amount: 1000 },
-  "gift-018": { key: "gift-018", name: "Mystic Flash", emoji: "\u{1F451}", amount: 500 },
-  "gift-019": { key: "gift-019", name: "Sky Glitter", emoji: "\u{1F48E}", amount: 1000 },
-  "gift-020": { key: "gift-020", name: "Shimmer Path", emoji: "\u{1F451}", amount: 500 },
-  "gift-021": { key: "gift-021", name: "Moon Palace", emoji: "\u{1F48E}", amount: 1000 },
-  "gift-022": { key: "gift-022", name: "Velvet Night", emoji: "\u{1F451}", amount: 500 },
-  "gift-023": { key: "gift-023", name: "Neon Crown", emoji: "\u{1F48E}", amount: 1000 },
-  "gift-024": { key: "gift-024", name: "Star Parade", emoji: "\u{1F451}", amount: 500 },
-  "gift-025": { key: "gift-025", name: "Diamond Rain", emoji: "\u{1F48E}", amount: 1000 },
-  "gift-026": { key: "gift-026", name: "Sapphire Jet", emoji: "\u{1F48E}", amount: 2000 },
-  "gift-027": { key: "gift-027", name: "Platinum Storm", emoji: "\u{1F451}", amount: 5000 },
-  "gift-028": { key: "gift-028", name: "Royal Blizzard", emoji: "\u{1F48E}", amount: 2000 },
-  "gift-029": { key: "gift-029", name: "Eternal Shine", emoji: "\u{1F451}", amount: 5000 },
-  "gift-030": { key: "gift-030", name: "Galaxy Drift", emoji: "\u{1F48E}", amount: 2000 },
-  "gift-031": { key: "gift-031", name: "Ocean Legend", emoji: "\u{1F451}", amount: 5000 },
-  "gift-032": { key: "gift-032", name: "Phoenix Pulse", emoji: "\u{1F48E}", amount: 2000 },
-  "gift-033": { key: "gift-033", name: "Kiss Gift", emoji: "\u{1F48E}", amount: 10000 },
-  "gift-034": { key: "gift-034", name: "Love Ring", emoji: "\u{1F48E}", amount: 12000 },
-  "gift-035": { key: "gift-035", name: "Luxury Purse", emoji: "\u{1F48E}", amount: 15000 },
-  "gift-036": { key: "gift-036", name: "Luxury Watch", emoji: "\u{1F48E}", amount: 18000 },
-  "gift-037": { key: "gift-037", name: "Marry", emoji: "\u{1F48E}", amount: 20000 },
-} as const;
+type GiftCatalogEntry = {
+  key: string;
+  name: string;
+  emoji: string;
+  amount: number;
+};
+
+const SVGA_GIFT_COUNT = 37;
+const PNG_GIFT_COUNT = 20;
+const COMMON_PRICES = [5, 10, 15, 25, 35, 40, 45, 50, 60, 75, 90, 100];
+const HOT_PRICES = [280, 300, 320, 340, 350, 360, 380, 400, 420, 450, 480, 500, 520, 550, 580, 600, 620, 650, 680, 700, 750];
+const LUXURY_PRICES = [800, 850, 900, 1000, 1050, 1100, 1150, 1200, 1500, 1600, 1800, 2000];
+const EXPENSIVE_PRICES = [2100, 2500, 3000, 3500, 4000, 4500, 5000];
+
+function padGiftIndex(index: number) {
+  return String(index).padStart(3, "0");
+}
+
+function buildGiftPrices(totalCount: number) {
+  const prices = [...COMMON_PRICES, ...HOT_PRICES, ...LUXURY_PRICES, ...EXPENSIVE_PRICES];
+  let cursor = EXPENSIVE_PRICES[EXPENSIVE_PRICES.length - 1];
+  while (prices.length < totalCount) {
+    cursor += 500;
+    prices.push(cursor);
+  }
+  return prices.slice(0, totalCount);
+}
+
+function buildGiftCatalog() {
+  const totalCount = SVGA_GIFT_COUNT + PNG_GIFT_COUNT;
+  const prices = buildGiftPrices(totalCount);
+  const catalog: Record<string, GiftCatalogEntry> = {};
+  let priceIndex = 0;
+
+  for (let i = 1; i <= SVGA_GIFT_COUNT; i += 1) {
+    const key = `gift-${padGiftIndex(i)}`;
+    catalog[key] = {
+      key,
+      name: `SVGA Gift ${padGiftIndex(i)}`,
+      emoji: "\u{1F48E}",
+      amount: prices[priceIndex],
+    };
+    priceIndex += 1;
+  }
+
+  for (let i = 1; i <= PNG_GIFT_COUNT; i += 1) {
+    const key = `png-gift-${padGiftIndex(i)}`;
+    catalog[key] = {
+      key,
+      name: `PNG Gift ${padGiftIndex(i)}`,
+      emoji: "\u{1F48E}",
+      amount: prices[priceIndex],
+    };
+    priceIndex += 1;
+  }
+
+  return catalog;
+}
+
+const giftCatalog: Record<string, GiftCatalogEntry> = buildGiftCatalog();
 
 const giftMessagePrefix = "__YOP_GIFT__:";
 
 const sendGiftSchema = z.object({
   giftKey: z.string().trim().min(1).max(64),
+  quantity: z.union([z.literal(1), z.literal(10), z.literal(50), z.literal(100)]).default(1),
 });
 
 const giftMessagePayloadSchema = z.object({
@@ -82,6 +104,8 @@ const giftMessagePayloadSchema = z.object({
   giftName: z.string().min(1),
   giftEmoji: z.string().min(1),
   amount: z.number().int().positive(),
+  quantity: z.number().int().positive().optional(),
+  unitAmount: z.number().int().positive().optional(),
 });
 
 export const sessionsRouter = Router();
@@ -108,23 +132,27 @@ function splitAmount(grossAmount: number, partnerPercent: number, companyPercent
 }
 
 function buildGiftMessageBody(gift: {
-  key: keyof typeof giftCatalog;
+  key: string;
   name: string;
   emoji: string;
   amount: number;
+  quantity: number;
+  unitAmount: number;
 }) {
   return `${giftMessagePrefix}${JSON.stringify({
     giftKey: gift.key,
     giftName: gift.name,
     giftEmoji: gift.emoji,
     amount: gift.amount,
+    quantity: gift.quantity,
+    unitAmount: gift.unitAmount,
   })}`;
 }
 
 function getGiftByKey(giftKey: string) {
   if (!giftKey) return null;
   if (!Object.prototype.hasOwnProperty.call(giftCatalog, giftKey)) return null;
-  return giftCatalog[giftKey as keyof typeof giftCatalog];
+  return giftCatalog[giftKey];
 }
 
 function parseGiftMessageBody(body: string) {
@@ -138,6 +166,8 @@ function parseGiftMessageBody(body: string) {
       name: payload.giftName,
       emoji: payload.giftEmoji,
       amount: payload.amount,
+      quantity: payload.quantity ?? 1,
+      unitAmount: payload.unitAmount ?? payload.amount,
     };
   } catch {
     return null;
@@ -230,6 +260,8 @@ function toMessageResponse(
           giftName: gift.name,
           giftEmoji: gift.emoji,
           amount: gift.amount,
+          quantity: gift.quantity,
+          unitAmount: gift.unitAmount,
         }
       : null,
     createdAt: message.createdAt.toISOString(),
@@ -466,11 +498,13 @@ sessionsRouter.post(
     const sessionId = String(req.params.id);
     const payloadResult = sendGiftSchema.safeParse(req.body ?? {});
     const requestedGiftKey = payloadResult.success ? payloadResult.data.giftKey : "";
+    const requestedQuantity = payloadResult.success ? payloadResult.data.quantity : undefined;
 
     console.info("[sessions:gifts] request", {
       sessionId,
       userId: authUser.id,
       giftKey: requestedGiftKey || null,
+      quantity: requestedQuantity ?? null,
     });
 
     if (!payloadResult.success) {
@@ -487,13 +521,17 @@ sessionsRouter.post(
     }
 
     const gift = getGiftByKey(payloadResult.data.giftKey);
+    const quantity = payloadResult.data.quantity;
+    const totalAmount = gift ? gift.amount * quantity : 0;
     console.info("[sessions:gifts] catalog lookup", {
       sessionId,
       userId: authUser.id,
       giftKey: payloadResult.data.giftKey,
+      quantity,
       found: Boolean(gift),
       giftName: gift?.name ?? null,
       amount: gift?.amount ?? null,
+      totalAmount: gift ? totalAmount : null,
     });
     if (!gift) {
       res.status(400).json({
@@ -546,10 +584,10 @@ sessionsRouter.post(
         const debited = await tx.walletAccount.updateMany({
           where: {
             id: wallet.id,
-            balance: { gte: gift.amount },
+            balance: { gte: totalAmount },
           },
           data: {
-            balance: { decrement: gift.amount },
+            balance: { decrement: totalAmount },
           },
         });
 
@@ -558,9 +596,11 @@ sessionsRouter.post(
             sessionId,
             userId: authUser.id,
             giftKey: gift.key,
+            quantity,
             walletId: wallet.id,
             walletBalance: wallet.balance,
             giftAmount: gift.amount,
+            totalAmount,
             debitCount: debited.count,
           });
           return {
@@ -581,15 +621,15 @@ sessionsRouter.post(
             transactionCode: createCode("TXN"),
             walletAccountId: wallet.id,
             type: TransactionType.GIFT,
-            amount: -gift.amount,
+            amount: -totalAmount,
             status: TransactionStatus.SUCCESS,
             gateway: "WALLET",
             referenceId: session.id,
-            reason: `Gift ${gift.name} sent in session ${session.sessionCode}`,
+            reason: `Gift ${gift.name} x${quantity} sent in session ${session.sessionCode}`,
           },
         });
 
-        const giftSplit = splitAmount(gift.amount, 40, 60);
+        const giftSplit = splitAmount(totalAmount, 40, 60);
         await tx.partnerEarning.upsert({
           where: {
             walletTransactionId: giftTransaction.id,
@@ -629,7 +669,9 @@ sessionsRouter.post(
               key: gift.key,
               name: gift.name,
               emoji: gift.emoji,
-              amount: gift.amount,
+              amount: totalAmount,
+              quantity,
+              unitAmount: gift.amount,
             }),
           },
           include: {
@@ -657,6 +699,8 @@ sessionsRouter.post(
         giftKey: gift.key,
         giftName: gift.name,
         giftAmount: gift.amount,
+        quantity,
+        totalAmount,
         error,
       });
       throw error;
@@ -675,6 +719,8 @@ sessionsRouter.post(
       userId: authUser.id,
       giftKey: gift.key,
       giftName: gift.name,
+      quantity,
+      totalAmount,
       walletDebitedCount: result.walletDebitedCount,
       walletBalance: result.walletBalance,
     });
@@ -685,7 +731,9 @@ sessionsRouter.post(
         giftKey: gift.key,
         giftName: gift.name,
         giftEmoji: gift.emoji,
-        amount: gift.amount,
+        amount: totalAmount,
+        quantity,
+        unitAmount: gift.amount,
       },
       message: toMessageResponse(result.message, session, authUser.id),
     });
