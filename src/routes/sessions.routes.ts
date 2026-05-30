@@ -40,30 +40,18 @@ type GiftCatalogEntry = {
 
 const SVGA_GIFT_COUNT = 37;
 const PNG_GIFT_COUNT = 20;
-const COMMON_PRICES = [5, 10, 15, 25, 35, 40, 45, 50, 60, 75, 90, 100];
-const HOT_PRICES = [280, 300, 320, 340, 350, 360, 380, 400, 420, 450, 480, 500, 520, 550, 580, 600, 620, 650, 680, 700, 750];
-const LUXURY_PRICES = [800, 850, 900, 1000, 1050, 1100, 1150, 1200, 1500, 1600, 1800, 2000];
-const EXPENSIVE_PRICES = [2100, 2500, 3000, 3500, 4000, 4500, 5000];
+const NORMAL_PNG_PRICES = [5, 10, 15, 25, 35, 40, 45, 50, 60, 75, 90, 100, 150, 200, 250, 300, 350, 400, 450, 500];
+const PREMIUM_SVGA_PRICES = [600, 700, 800, 900, 1000, 1200, 1500, 1800, 2000];
+const LUXURY_SVGA_PRICES = [2500, 3000, 3500, 4000, 4500, 5000, 6000, 7000, 8000, 9000];
+const EXPENSIVE_SVGA_PRICES = [10000, 11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000, 24000, 25000, 26000, 27000];
 
 function padGiftIndex(index: number) {
   return String(index).padStart(3, "0");
 }
 
-function buildGiftPrices(totalCount: number) {
-  const prices = [...COMMON_PRICES, ...HOT_PRICES, ...LUXURY_PRICES, ...EXPENSIVE_PRICES];
-  let cursor = EXPENSIVE_PRICES[EXPENSIVE_PRICES.length - 1];
-  while (prices.length < totalCount) {
-    cursor += 500;
-    prices.push(cursor);
-  }
-  return prices.slice(0, totalCount);
-}
-
 function buildGiftCatalog() {
-  const totalCount = SVGA_GIFT_COUNT + PNG_GIFT_COUNT;
-  const prices = buildGiftPrices(totalCount);
+  const svgaPrices = [...PREMIUM_SVGA_PRICES, ...LUXURY_SVGA_PRICES, ...EXPENSIVE_SVGA_PRICES];
   const catalog: Record<string, GiftCatalogEntry> = {};
-  let priceIndex = 0;
 
   for (let i = 1; i <= SVGA_GIFT_COUNT; i += 1) {
     const key = `gift-${padGiftIndex(i)}`;
@@ -71,9 +59,8 @@ function buildGiftCatalog() {
       key,
       name: `SVGA Gift ${padGiftIndex(i)}`,
       emoji: "\u{1F48E}",
-      amount: prices[priceIndex],
+      amount: svgaPrices[i - 1],
     };
-    priceIndex += 1;
   }
 
   for (let i = 1; i <= PNG_GIFT_COUNT; i += 1) {
@@ -82,9 +69,8 @@ function buildGiftCatalog() {
       key,
       name: `PNG Gift ${padGiftIndex(i)}`,
       emoji: "\u{1F48E}",
-      amount: prices[priceIndex],
+      amount: NORMAL_PNG_PRICES[i - 1],
     };
-    priceIndex += 1;
   }
 
   return catalog;
