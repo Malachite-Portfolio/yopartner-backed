@@ -989,8 +989,11 @@ const endSessionHandler = asyncHandler(async (req, res) => {
   const platformFee = session.amount - companionEarning;
 
   const updated = await prisma.$transaction(async (tx) => {
-    const next = await tx.session.update({
-      where: { id: session.id },
+    const markEnded = await tx.session.updateMany({
+      where: {
+        id: session.id,
+        status: { in: ACTIVE_SESSION_STATUSES },
+      },
       data: {
         status: SessionStatus.ENDED,
         endedAt: now,
@@ -1001,34 +1004,110 @@ const endSessionHandler = asyncHandler(async (req, res) => {
       },
     });
 
-    await tx.partnerEarning.upsert({
-      where: {
-        sourceType_sessionId: {
-          sourceType: PartnerEarningSourceType.SESSION,
-          sessionId: session.id,
-        },
-      },
-      create: {
-        companionId: session.companionId,
-        userId: session.userId,
-        sessionId: session.id,
-        sourceType: PartnerEarningSourceType.SESSION,
-        grossAmount: sessionSplit.grossAmount,
-        partnerAmount: sessionSplit.partnerAmount,
-        companyAmount: sessionSplit.companyAmount,
-        partnerPercent: sessionSplit.partnerPercent,
-        companyPercent: sessionSplit.companyPercent,
-        status: PartnerEarningStatus.AVAILABLE,
-      },
-      update: {
-        grossAmount: sessionSplit.grossAmount,
-        partnerAmount: sessionSplit.partnerAmount,
-        companyAmount: sessionSplit.companyAmount,
-        partnerPercent: sessionSplit.partnerPercent,
-        companyPercent: sessionSplit.companyPercent,
-      },
-    });
+    if (markEnded.count === 0) {
+      const latest = await tx.session.findUnique({
+        where: { id: session.id },
+      });
+      if (!latest) throw new HttpError(404, "Session not found.");
+      return latest;
+    }
 
+    let chargeSucceeded = session.amount <= 0;
+
+    if (session.amount > 0) {
+      const wallet = await tx.walletAccount.upsert({
+        where: { userId: session.userId },
+        update: {},
+        create: { userId: session.userId },
+      });
+
+      const existingCharge = await tx.walletTransaction.findFirst({
+        where: {
+          walletAccountId: wallet.id,
+          type: TransactionType.BOOKING,
+          status: TransactionStatus.SUCCESS,
+          referenceId: session.id,
+        },
+        select: { id: true },
+      });
+
+      if (!existingCharge) {
+        const debited = await tx.walletAccount.updateMany({
+          where: {
+            id: wallet.id,
+            balance: { gte: session.amount },
+          },
+          data: {
+            balance: { decrement: session.amount },
+          },
+        });
+
+        if (debited.count > 0) {
+          await tx.walletTransaction.create({
+            data: {
+              transactionCode: createCode("TXN"),
+              walletAccountId: wallet.id,
+              type: TransactionType.BOOKING,
+              amount: -session.amount,
+              status: TransactionStatus.SUCCESS,
+              referenceId: session.id,
+              reason: `Session charge for ${session.sessionCode} (${session.serviceType})`,
+            },
+          });
+          chargeSucceeded = true;
+        } else {
+          await tx.walletTransaction.create({
+            data: {
+              transactionCode: createCode("TXN"),
+              walletAccountId: wallet.id,
+              type: TransactionType.BOOKING,
+              amount: -session.amount,
+              status: TransactionStatus.FAILED,
+              referenceId: session.id,
+              reason: `Session charge failed (insufficient balance) for ${session.sessionCode} (${session.serviceType})`,
+            },
+          });
+          chargeSucceeded = false;
+        }
+      } else {
+        chargeSucceeded = true;
+      }
+    }
+
+    if (chargeSucceeded) {
+      await tx.partnerEarning.upsert({
+        where: {
+          sourceType_sessionId: {
+            sourceType: PartnerEarningSourceType.SESSION,
+            sessionId: session.id,
+          },
+        },
+        create: {
+          companionId: session.companionId,
+          userId: session.userId,
+          sessionId: session.id,
+          sourceType: PartnerEarningSourceType.SESSION,
+          grossAmount: sessionSplit.grossAmount,
+          partnerAmount: sessionSplit.partnerAmount,
+          companyAmount: sessionSplit.companyAmount,
+          partnerPercent: sessionSplit.partnerPercent,
+          companyPercent: sessionSplit.companyPercent,
+          status: PartnerEarningStatus.AVAILABLE,
+        },
+        update: {
+          grossAmount: sessionSplit.grossAmount,
+          partnerAmount: sessionSplit.partnerAmount,
+          companyAmount: sessionSplit.companyAmount,
+          partnerPercent: sessionSplit.partnerPercent,
+          companyPercent: sessionSplit.companyPercent,
+        },
+      });
+    }
+
+    const next = await tx.session.findUnique({
+      where: { id: session.id },
+    });
+    if (!next) throw new HttpError(404, "Session not found.");
     return next;
   });
 
