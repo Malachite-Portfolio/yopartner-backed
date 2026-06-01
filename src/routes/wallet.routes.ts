@@ -5,6 +5,7 @@ import { requireAuth } from "../middlewares/auth";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { createCode, HttpError } from "../utils/http";
+import { assertUserCanAddMoney } from "../utils/moderation";
 
 const createOrderSchema = z.object({
   amount: z.number().int().positive(),
@@ -60,6 +61,12 @@ walletRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
+    const user = await prisma.user.findUnique({
+      where: { id: authUser.id },
+      select: { moderationStatus: true, moderationExpiresAt: true },
+    });
+    if (!user) throw new HttpError(404, "User not found.");
+    assertUserCanAddMoney(user);
     const body = createOrderSchema.parse(req.body);
     const wallet = await prisma.walletAccount.findUnique({
       where: { userId: authUser.id },

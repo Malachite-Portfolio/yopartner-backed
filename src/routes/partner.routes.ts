@@ -18,6 +18,7 @@ import { prisma } from "../db/prisma";
 import { HttpError } from "../utils/http";
 import { firebaseAdminAuth, isFirebaseAdminConfigured } from "../config/firebaseAdmin";
 import { env } from "../config/env";
+import { assertPartnerDashboardAccess } from "../utils/moderation";
 
 const onboardingSchema = z.object({
   fullName: z.string().min(2),
@@ -232,6 +233,11 @@ partnerRouter.post(
           chatPrice,
           audioPrice,
           videoPrice,
+          homeVisitRequested: Boolean(payload.homeVisitRequested),
+          homeVisitPrice:
+            payload.homeVisitRequested && payload.homeVisitPrice !== undefined
+              ? payload.homeVisitPrice
+              : null,
           categories: payload.categories,
           safetyChecklist: payload.safetyChecklist,
           selfieUploaded: selfie.uploaded,
@@ -336,6 +342,7 @@ partnerRouter.get(
         orderBy: { createdAt: "desc" },
       }),
     ]);
+    assertPartnerDashboardAccess(companion);
 
     const isApproved = Boolean(
       application?.status === "APPROVED" ||
@@ -562,6 +569,7 @@ partnerRouter.get(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
     if (
       !companion ||
       companion.status !== CompanionStatus.ACTIVE ||
@@ -603,6 +611,7 @@ partnerRouter.post(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
     if (
       !companion ||
       companion.status !== CompanionStatus.ACTIVE ||
@@ -677,6 +686,7 @@ partnerRouter.post(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
     if (
       !companion ||
       companion.status !== CompanionStatus.ACTIVE ||
@@ -721,6 +731,7 @@ partnerRouter.get(
     const companion = await prisma.companion.findFirst({
       where: { userId: authUser.id },
     });
+    assertPartnerDashboardAccess(companion);
     const application = await prisma.partnerApplication.findFirst({
       where: {
         applicantUserId: authUser.id,
@@ -740,6 +751,7 @@ partnerRouter.patch(
     const companion = await prisma.companion.findFirst({
       where: { userId: authUser.id },
     });
+    assertPartnerDashboardAccess(companion);
     if (
       !companion ||
       companion.status !== CompanionStatus.ACTIVE ||
@@ -768,6 +780,7 @@ partnerRouter.post(
     const companion = await prisma.companion.findFirst({
       where: { userId: authUser.id },
     });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       throw new HttpError(404, "Companion profile not found.");
     }
@@ -795,6 +808,7 @@ partnerRouter.post(
     const companion = await prisma.companion.findFirst({
       where: { userId: authUser.id },
     });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       throw new HttpError(404, "Companion profile not found.");
     }
@@ -823,6 +837,7 @@ partnerRouter.post(
     const companion = await prisma.companion.findFirst({
       where: { userId: authUser.id },
     });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       throw new HttpError(404, "Companion profile not found.");
     }
@@ -901,6 +916,7 @@ partnerRouter.patch(
     const companion = await prisma.companion.findFirst({
       where: { userId: authUser.id },
     });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       throw new HttpError(404, "Companion profile not found.");
     }
@@ -930,12 +946,15 @@ partnerRouter.get(
       where: { userId: authUser.id },
       select: {
         id: true,
+        moderationStatus: true,
+        moderationExpiresAt: true,
         profileImageUrl: true,
         profileImageStoragePath: true,
         galleryImageUrls: true,
         galleryImageStoragePaths: true,
       },
     });
+    assertPartnerDashboardAccess(companion);
 
     if (!companion) {
       throw new HttpError(404, "Companion profile not found.");
@@ -977,8 +996,9 @@ partnerRouter.put(
     const payload = partnerProfileImageSchema.parse(req.body);
     const companion = await prisma.companion.findFirst({
       where: { userId: authUser.id },
-      select: { id: true },
+      select: { id: true, moderationStatus: true, moderationExpiresAt: true },
     });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       throw new HttpError(404, "Companion profile not found.");
     }
@@ -1013,10 +1033,13 @@ partnerRouter.post(
       where: { userId: authUser.id },
       select: {
         id: true,
+        moderationStatus: true,
+        moderationExpiresAt: true,
         galleryImageUrls: true,
         galleryImageStoragePaths: true,
       },
     });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       throw new HttpError(404, "Companion profile not found.");
     }
@@ -1075,10 +1098,13 @@ partnerRouter.delete(
       where: { userId: authUser.id },
       select: {
         id: true,
+        moderationStatus: true,
+        moderationExpiresAt: true,
         galleryImageUrls: true,
         galleryImageStoragePaths: true,
       },
     });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       throw new HttpError(404, "Companion profile not found.");
     }
@@ -1124,6 +1150,7 @@ partnerRouter.get(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       res.json({ bookings: [] });
       return;
@@ -1144,6 +1171,7 @@ partnerRouter.get(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       res.json({ sessions: [] });
       return;
@@ -1165,6 +1193,7 @@ partnerRouter.get(
     const authUser = req.authUser!;
     const isAdmin = authUser.role === Role.ADMIN;
     const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
     if (!companion) {
       res.json({
         earnings: [],

@@ -1,6 +1,9 @@
 import { Router } from "express";
 import {
   CompanionStatus,
+  HomeVisitVerificationStatus,
+  ModerationTargetType,
+  PartnerModerationStatus,
   PartnerEarningSourceType,
   PartnerEarningStatus,
   PartnerApplicationStatus,
@@ -10,12 +13,22 @@ import {
   SessionStatus,
   TransactionStatus,
   TransactionType,
+  UserModerationStatus,
   VerificationStatus,
 } from "@prisma/client";
 import { requireAdminAccess } from "../middlewares/adminAccess";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { createCode, HttpError } from "../utils/http";
+import {
+  isPartnerTemporaryStatus,
+  isUserTemporaryStatus,
+  parseTemporaryExpiry,
+  resolvePartnerModerationStatus,
+  resolveUserModerationStatus,
+  toPartnerOffline,
+  toUserBlocked,
+} from "../utils/moderation";
 
 export const adminRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
@@ -53,6 +66,51 @@ function parseTransactionStatus(value: unknown): TransactionStatus | null {
     normalized === TransactionStatus.FAILED
   ) {
     return normalized as TransactionStatus;
+  }
+  return null;
+}
+
+function parseUserModerationStatus(value: unknown): UserModerationStatus | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase();
+  if (
+    normalized === UserModerationStatus.ACTIVE ||
+    normalized === UserModerationStatus.RESTRICTED ||
+    normalized === UserModerationStatus.TEMP_BANNED ||
+    normalized === UserModerationStatus.BANNED
+  ) {
+    return normalized as UserModerationStatus;
+  }
+  return null;
+}
+
+function parsePartnerModerationStatus(value: unknown): PartnerModerationStatus | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase();
+  if (
+    normalized === PartnerModerationStatus.ACTIVE ||
+    normalized === PartnerModerationStatus.RESTRICTED ||
+    normalized === PartnerModerationStatus.TEMP_BANNED ||
+    normalized === PartnerModerationStatus.BANNED ||
+    normalized === PartnerModerationStatus.HIDDEN
+  ) {
+    return normalized as PartnerModerationStatus;
+  }
+  return null;
+}
+
+function parseHomeVisitVerificationStatus(value: unknown): HomeVisitVerificationStatus | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase();
+  if (
+    normalized === HomeVisitVerificationStatus.NOT_SUBMITTED ||
+    normalized === HomeVisitVerificationStatus.PENDING ||
+    normalized === HomeVisitVerificationStatus.APPROVED ||
+    normalized === HomeVisitVerificationStatus.REJECTED ||
+    normalized === HomeVisitVerificationStatus.NEEDS_INFO ||
+    normalized === HomeVisitVerificationStatus.SUSPENDED
+  ) {
+    return normalized as HomeVisitVerificationStatus;
   }
   return null;
 }
@@ -119,7 +177,12 @@ adminRouter.get(
       include: { walletAccount: true, bookings: true },
       orderBy: { createdAt: "desc" },
     });
-    res.json({ users });
+    res.json({
+      users: users.map((user) => ({
+        ...user,
+        moderationStatus: resolveUserModerationStatus(user),
+      })),
+    });
   }),
 );
 
@@ -247,8 +310,6 @@ adminRouter.get(
   asyncHandler(async (_req, res) => {
     const companions = await prisma.companion.findMany({
       where: {
-        status: CompanionStatus.ACTIVE,
-        verificationStatus: VerificationStatus.VERIFIED,
         ...(shouldExcludeDemoPartner
           ? {
               user: {
@@ -297,11 +358,173 @@ adminRouter.get(
         const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
         return {
           ...companion,
+          moderationStatus: resolvePartnerModerationStatus(companion),
           isBusy,
           effectiveStatus,
         };
       }),
     });
+  }),
+);
+
+adminRouter.patch(
+  "/users/:id/status",
+  asyncHandler(async (req, res) => {
+    const userId = String(req.params.id ?? "").trim();
+    if (!userId) throw new HttpError(400, "User ID is required.");
+
+    const nextStatus = parseUserModerationStatus(req.body?.status);
+    if (!nextStatus) {
+      throw new HttpError(400, "status must be ACTIVE, RESTRICTED, TEMP_BANNED, or BANNED.");
+    }
+
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (!reason) throw new HttpError(400, "reason is required.");
+    const expiresAt = parseTemporaryExpiry(req.body?.expiresAt);
+    if (isUserTemporaryStatus(nextStatus) && !expiresAt) {
+      throw new HttpError(400, "expiresAt is required for temporary status updates.");
+    }
+    if (nextStatus === UserModerationStatus.ACTIVE && expiresAt) {
+      throw new HttpError(400, "expiresAt is not allowed for ACTIVE status.");
+    }
+    if (expiresAt && expiresAt.getTime() <= Date.now()) {
+      throw new HttpError(400, "expiresAt must be in the future.");
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new HttpError(404, "User not found.");
+    const previousStatus = resolveUserModerationStatus(user);
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const nextUser = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          moderationStatus: nextStatus,
+          moderationReason: reason,
+          moderationExpiresAt: isUserTemporaryStatus(nextStatus) ? expiresAt : null,
+          moderatedAt: new Date(),
+          moderatedBy: req.authUser?.adminLoginId ?? req.authUser?.phoneNumber ?? req.authUser?.id ?? "ADMIN",
+          isBlocked: toUserBlocked(nextStatus),
+        },
+      });
+
+      await tx.moderationAction.create({
+        data: {
+          targetType: ModerationTargetType.USER,
+          targetId: user.id,
+          actionType: `USER_${nextStatus}`,
+          previousStatus,
+          newStatus: nextStatus,
+          reason,
+          expiresAt: isUserTemporaryStatus(nextStatus) ? expiresAt : null,
+          adminId: req.authUser?.id ?? "ADMIN",
+          adminEmail:
+            typeof req.body?.adminEmail === "string" && req.body.adminEmail.trim().length > 0
+              ? req.body.adminEmail.trim()
+              : null,
+        },
+      });
+
+      return nextUser;
+    });
+
+    res.json({
+      user: {
+        ...updated,
+        moderationStatus: resolveUserModerationStatus(updated),
+      },
+    });
+  }),
+);
+
+adminRouter.patch(
+  "/partners/:id/status",
+  asyncHandler(async (req, res) => {
+    const companionId = String(req.params.id ?? "").trim();
+    if (!companionId) throw new HttpError(400, "Partner ID is required.");
+
+    const nextStatus = parsePartnerModerationStatus(req.body?.status);
+    if (!nextStatus) {
+      throw new HttpError(400, "status must be ACTIVE, RESTRICTED, TEMP_BANNED, BANNED, or HIDDEN.");
+    }
+
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (!reason) throw new HttpError(400, "reason is required.");
+    const expiresAt = parseTemporaryExpiry(req.body?.expiresAt);
+    if (isPartnerTemporaryStatus(nextStatus) && !expiresAt) {
+      throw new HttpError(400, "expiresAt is required for temporary status updates.");
+    }
+    if ((nextStatus === PartnerModerationStatus.ACTIVE || nextStatus === PartnerModerationStatus.HIDDEN) && expiresAt) {
+      throw new HttpError(400, "expiresAt is not allowed for this status.");
+    }
+    if (expiresAt && expiresAt.getTime() <= Date.now()) {
+      throw new HttpError(400, "expiresAt must be in the future.");
+    }
+
+    const companion = await prisma.companion.findUnique({ where: { id: companionId } });
+    if (!companion) throw new HttpError(404, "Partner not found.");
+    const previousStatus = resolvePartnerModerationStatus(companion);
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const nextCompanion = await tx.companion.update({
+        where: { id: companion.id },
+        data: {
+          moderationStatus: nextStatus,
+          moderationReason: reason,
+          moderationExpiresAt: isPartnerTemporaryStatus(nextStatus) ? expiresAt : null,
+          moderatedAt: new Date(),
+          moderatedBy: req.authUser?.adminLoginId ?? req.authUser?.phoneNumber ?? req.authUser?.id ?? "ADMIN",
+          isOnline: toPartnerOffline(nextStatus) ? false : companion.isOnline,
+        },
+      });
+
+      await tx.moderationAction.create({
+        data: {
+          targetType: ModerationTargetType.PARTNER,
+          targetId: companion.id,
+          actionType: `PARTNER_${nextStatus}`,
+          previousStatus,
+          newStatus: nextStatus,
+          reason,
+          expiresAt: isPartnerTemporaryStatus(nextStatus) ? expiresAt : null,
+          adminId: req.authUser?.id ?? "ADMIN",
+          adminEmail:
+            typeof req.body?.adminEmail === "string" && req.body.adminEmail.trim().length > 0
+              ? req.body.adminEmail.trim()
+              : null,
+        },
+      });
+
+      return nextCompanion;
+    });
+
+    res.json({
+      companion: {
+        ...updated,
+        moderationStatus: resolvePartnerModerationStatus(updated),
+      },
+    });
+  }),
+);
+
+adminRouter.get(
+  "/moderation/actions",
+  asyncHandler(async (req, res) => {
+    const target = typeof req.query.target === "string" ? req.query.target.trim().toUpperCase() : "";
+    const where: Prisma.ModerationActionWhereInput = {};
+    if (
+      target === ModerationTargetType.USER ||
+      target === ModerationTargetType.PARTNER ||
+      target === ModerationTargetType.HOME_VISIT
+    ) {
+      where.targetType = target as ModerationTargetType;
+    }
+    const actions = await prisma.moderationAction.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: 500,
+    });
+    res.json({ actions });
   }),
 );
 
@@ -347,6 +570,8 @@ adminRouter.get(
         chatPrice: true,
         audioPrice: true,
         videoPrice: true,
+        homeVisitRequested: true,
+        homeVisitPrice: true,
         categories: true,
         safetyChecklist: true,
         selfieUploaded: true,
@@ -419,6 +644,8 @@ adminRouter.get(
         chatPrice: true,
         audioPrice: true,
         videoPrice: true,
+        homeVisitRequested: true,
+        homeVisitPrice: true,
         categories: true,
         safetyChecklist: true,
         selfieUploaded: true,
@@ -507,6 +734,9 @@ adminRouter.patch(
             data: {
               status: CompanionStatus.ACTIVE,
               verificationStatus: VerificationStatus.VERIFIED,
+              homeVisitVerificationStatus: application.homeVisitRequested
+                ? HomeVisitVerificationStatus.PENDING
+                : companion.homeVisitVerificationStatus,
             },
           });
         } else {
@@ -524,6 +754,9 @@ adminRouter.patch(
               videoPrice: application.videoPrice,
               status: CompanionStatus.ACTIVE,
               verificationStatus: VerificationStatus.VERIFIED,
+              homeVisitVerificationStatus: application.homeVisitRequested
+                ? HomeVisitVerificationStatus.PENDING
+                : HomeVisitVerificationStatus.NOT_SUBMITTED,
             },
           });
           await tx.partnerApplication.update({
@@ -920,6 +1153,127 @@ adminRouter.get(
     const key = String(req.params.key);
     const setting = await prisma.platformSetting.findUnique({ where: { key } });
     res.json({ setting });
+  }),
+);
+
+adminRouter.get(
+  "/home-visit-verifications",
+  asyncHandler(async (_req, res) => {
+    const companions = await prisma.companion.findMany({
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            phoneNumber: true,
+          },
+        },
+        partnerApplications: {
+          where: {
+            status: {
+              in: [PartnerApplicationStatus.APPROVED, PartnerApplicationStatus.UNDER_REVIEW, PartnerApplicationStatus.NEEDS_INFO],
+            },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+        },
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+
+    res.json({
+      verifications: companions.map((companion) => {
+        const latestApplication = companion.partnerApplications[0] ?? null;
+        const status = companion.homeVisitVerificationStatus;
+        const computedStatus =
+          status === HomeVisitVerificationStatus.NOT_SUBMITTED && latestApplication?.homeVisitRequested
+            ? HomeVisitVerificationStatus.PENDING
+            : status;
+
+        return {
+          id: companion.id,
+          companionId: companion.id,
+          companionName: companion.displayName,
+          companionStatus: companion.status,
+          companionVerificationStatus: companion.verificationStatus,
+          moderationStatus: resolvePartnerModerationStatus(companion),
+          homeVisitStatus: computedStatus,
+          adminNote: companion.homeVisitVerificationNote,
+          reviewedAt: companion.homeVisitVerifiedAt,
+          reviewedBy: companion.homeVisitVerifiedBy,
+          createdAt: companion.createdAt,
+          updatedAt: companion.updatedAt,
+          user: companion.user,
+          request: latestApplication
+            ? {
+                applicationId: latestApplication.id,
+                homeVisitRequested: latestApplication.homeVisitRequested,
+                homeVisitPrice: latestApplication.homeVisitPrice,
+                city: latestApplication.bornCity,
+                languages: latestApplication.languagesKnown,
+                categories: latestApplication.categories,
+                safetyChecklist: latestApplication.safetyChecklist,
+                selfieUrl: latestApplication.selfieUrl,
+                aadhaarFrontUploaded: latestApplication.aadhaarFrontUploaded,
+                aadhaarBackUploaded: latestApplication.aadhaarBackUploaded,
+                panUploaded: latestApplication.panUploaded,
+              }
+            : null,
+        };
+      }),
+    });
+  }),
+);
+
+adminRouter.patch(
+  "/home-visit-verifications/:id/status",
+  asyncHandler(async (req, res) => {
+    const companionId = String(req.params.id ?? "").trim();
+    if (!companionId) throw new HttpError(400, "Companion ID is required.");
+
+    const nextStatus = parseHomeVisitVerificationStatus(req.body?.status);
+    if (!nextStatus) {
+      throw new HttpError(400, "status must be NOT_SUBMITTED, PENDING, APPROVED, REJECTED, NEEDS_INFO, or SUSPENDED.");
+    }
+
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (!reason) throw new HttpError(400, "reason is required.");
+
+    const companion = await prisma.companion.findUnique({ where: { id: companionId } });
+    if (!companion) throw new HttpError(404, "Companion not found.");
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const next = await tx.companion.update({
+        where: { id: companion.id },
+        data: {
+          homeVisitVerificationStatus: nextStatus,
+          homeVisitVerificationNote: reason,
+          homeVisitVerifiedAt: new Date(),
+          homeVisitVerifiedBy: req.authUser?.adminLoginId ?? req.authUser?.phoneNumber ?? req.authUser?.id ?? "ADMIN",
+        },
+      });
+
+      await tx.moderationAction.create({
+        data: {
+          targetType: ModerationTargetType.HOME_VISIT,
+          targetId: companion.id,
+          actionType: `HOME_VISIT_${nextStatus}`,
+          previousStatus: companion.homeVisitVerificationStatus,
+          newStatus: nextStatus,
+          reason,
+          expiresAt: null,
+          adminId: req.authUser?.id ?? "ADMIN",
+          adminEmail:
+            typeof req.body?.adminEmail === "string" && req.body.adminEmail.trim().length > 0
+              ? req.body.adminEmail.trim()
+              : null,
+        },
+      });
+
+      return next;
+    });
+
+    res.json({ verification: updated });
   }),
 );
 

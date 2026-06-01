@@ -16,6 +16,11 @@ import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { createCode, HttpError } from "../utils/http";
 import { env } from "../config/env";
+import {
+  assertPartnerCanReceiveRequests,
+  assertUserCanSendGifts,
+  assertUserCanStartSession,
+} from "../utils/moderation";
 
 const createSessionSchema = z.object({
   bookingId: z.string().optional(),
@@ -482,6 +487,12 @@ sessionsRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
+    const requester = await prisma.user.findUnique({
+      where: { id: authUser.id },
+      select: { moderationStatus: true, moderationExpiresAt: true },
+    });
+    if (!requester) throw new HttpError(404, "User not found.");
+    assertUserCanSendGifts(requester);
     const sessionId = String(req.params.id);
     const payloadResult = sendGiftSchema.safeParse(req.body ?? {});
     const requestedGiftKey = payloadResult.success ? payloadResult.data.giftKey : "";
@@ -733,9 +744,16 @@ sessionsRouter.post(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const body = createSessionSchema.parse(req.body);
+    const requester = await prisma.user.findUnique({
+      where: { id: authUser.id },
+      select: { moderationStatus: true, moderationExpiresAt: true },
+    });
+    if (!requester) throw new HttpError(404, "User not found.");
+    assertUserCanStartSession(requester);
 
     const companion = await prisma.companion.findUnique({ where: { id: body.companionId } });
     if (!companion) throw new HttpError(404, "Companion not found.");
+    assertPartnerCanReceiveRequests(companion);
     if (companion.status !== CompanionStatus.ACTIVE || companion.verificationStatus !== VerificationStatus.VERIFIED) {
       throw new HttpError(403, "Companion is not available for new sessions yet.");
     }

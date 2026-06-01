@@ -93,6 +93,36 @@ enum VerificationStatus {
   NEEDS_REVIEW
 }
 
+enum UserModerationStatus {
+  ACTIVE
+  RESTRICTED
+  TEMP_BANNED
+  BANNED
+}
+
+enum PartnerModerationStatus {
+  ACTIVE
+  RESTRICTED
+  TEMP_BANNED
+  BANNED
+  HIDDEN
+}
+
+enum HomeVisitVerificationStatus {
+  NOT_SUBMITTED
+  PENDING
+  APPROVED
+  REJECTED
+  NEEDS_INFO
+  SUSPENDED
+}
+
+enum ModerationTargetType {
+  USER
+  PARTNER
+  HOME_VISIT
+}
+
 model User {
   id             String            @id @default(cuid())
   firebaseUid    String            @unique
@@ -105,6 +135,11 @@ model User {
   onboardingCompletedAt DateTime?
   role           Role              @default(USER)
   isBlocked      Boolean           @default(false)
+  moderationStatus UserModerationStatus @default(ACTIVE)
+  moderationReason String?
+  moderationExpiresAt DateTime?
+  moderatedBy    String?
+  moderatedAt    DateTime?
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
   companion      Companion?
@@ -134,6 +169,15 @@ model Companion {
   rating              Float                  @default(0)
   status              CompanionStatus        @default(UNDER_REVIEW)
   verificationStatus  VerificationStatus     @default(PENDING)
+  moderationStatus    PartnerModerationStatus @default(ACTIVE)
+  moderationReason    String?
+  moderationExpiresAt DateTime?
+  moderatedBy         String?
+  moderatedAt         DateTime?
+  homeVisitVerificationStatus HomeVisitVerificationStatus @default(NOT_SUBMITTED)
+  homeVisitVerificationNote   String?
+  homeVisitVerifiedAt         DateTime?
+  homeVisitVerifiedBy         String?
   isOnline            Boolean                @default(false)
   profileImageUrl     String?
   profileImageStoragePath String?
@@ -174,6 +218,8 @@ model PartnerApplication {
   chatPrice          Int                      @default(0)
   audioPrice         Int                      @default(0)
   videoPrice         Int                      @default(0)
+  homeVisitRequested Boolean                  @default(false)
+  homeVisitPrice     Int?
   categories         String[]
   safetyChecklist    String[]
   selfieUploaded     Boolean                  @default(false)
@@ -196,6 +242,22 @@ model PartnerApplication {
   adminNote          String?
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
+}
+
+model ModerationAction {
+  id             String               @id @default(cuid())
+  targetType     ModerationTargetType
+  targetId       String
+  actionType     String
+  previousStatus String?
+  newStatus      String
+  reason         String
+  expiresAt      DateTime?
+  adminId        String
+  adminEmail     String?
+  createdAt      DateTime             @default(now())
+
+  @@index([targetType, targetId, createdAt])
 }
 
 model Booking {

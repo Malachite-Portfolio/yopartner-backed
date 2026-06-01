@@ -5,6 +5,7 @@ import { requireAuth } from "../middlewares/auth";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { createCode, HttpError } from "../utils/http";
+import { assertPartnerCanReceiveRequests, assertUserCanStartSession } from "../utils/moderation";
 
 const createBookingSchema = z.object({
   companionId: z.string().min(1),
@@ -33,8 +34,15 @@ bookingsRouter.post(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const body = createBookingSchema.parse(req.body);
+    const requester = await prisma.user.findUnique({
+      where: { id: authUser.id },
+      select: { moderationStatus: true, moderationExpiresAt: true },
+    });
+    if (!requester) throw new HttpError(404, "User not found.");
+    assertUserCanStartSession(requester);
 
     const companion = await prisma.companion.findUnique({ where: { id: body.companionId } });
+    if (companion) assertPartnerCanReceiveRequests(companion);
     if (!companion || companion.status !== "ACTIVE") {
       throw new HttpError(404, "Companion not available.");
     }

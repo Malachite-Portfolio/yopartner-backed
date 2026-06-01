@@ -1,12 +1,15 @@
 import { Router } from "express";
 import {
   CompanionStatus,
+  HomeVisitVerificationStatus,
+  PartnerModerationStatus,
   PartnerApplicationStatus,
   SessionStatus,
   VerificationStatus,
 } from "@prisma/client";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
+import { resolvePartnerModerationStatus } from "../utils/moderation";
 
 export const companionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
@@ -69,6 +72,14 @@ function toPublicCompanionSummary(
     isBusy,
     effectiveStatus,
   };
+}
+
+function isCompanionVisibleForListing(companion: {
+  moderationStatus: PartnerModerationStatus;
+  moderationExpiresAt: Date | null;
+}) {
+  const status = resolvePartnerModerationStatus(companion);
+  return status !== PartnerModerationStatus.BANNED && status !== PartnerModerationStatus.TEMP_BANNED && status !== PartnerModerationStatus.HIDDEN;
 }
 
 function normalizeStringArray(value: string[] | null | undefined) {
@@ -156,6 +167,7 @@ companionsRouter.get(
       where: {
         status: CompanionStatus.ACTIVE,
         verificationStatus: VerificationStatus.VERIFIED,
+        moderationStatus: { notIn: [PartnerModerationStatus.BANNED, PartnerModerationStatus.TEMP_BANNED, PartnerModerationStatus.HIDDEN] },
         ...(online ? { isOnline: true } : {}),
         ...(category ? { category: { equals: category, mode: "insensitive" } } : {}),
         ...(search
@@ -178,10 +190,11 @@ companionsRouter.get(
         },
       },
     });
+    const visibleCompanions = companions.filter((companion) => isCompanionVisibleForListing(companion));
 
-    const busySet = await getBusyCompanionIds(companions.map((companion) => companion.id));
+    const busySet = await getBusyCompanionIds(visibleCompanions.map((companion) => companion.id));
     res.json({
-      companions: companions.map((companion) => {
+      companions: visibleCompanions.map((companion) => {
         const { partnerApplications } = companion;
         const isBusy = busySet.has(companion.id);
         const resolvedProfileImageUrl = companion.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
@@ -198,12 +211,61 @@ companionsRouter.get(
       where: {
         status: CompanionStatus.ACTIVE,
         verificationStatus: VerificationStatus.VERIFIED,
+        moderationStatus: { notIn: [PartnerModerationStatus.BANNED, PartnerModerationStatus.TEMP_BANNED, PartnerModerationStatus.HIDDEN] },
       },
       orderBy: [{ rating: "desc" }],
       take: 12,
       include: {
         partnerApplications: {
           where: { selfieUrl: { not: null } },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { selfieUrl: true },
+        },
+      },
+    });
+    const visibleCompanions = companions.filter((companion) => isCompanionVisibleForListing(companion));
+    const busySet = await getBusyCompanionIds(visibleCompanions.map((companion) => companion.id));
+    res.json({
+      companions: visibleCompanions.map((companion) => {
+        const { partnerApplications } = companion;
+        const isBusy = busySet.has(companion.id);
+        const resolvedProfileImageUrl = companion.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
+        return toPublicCompanionSummary(companion, resolvedProfileImageUrl, isBusy);
+      }),
+    });
+  }),
+);
+
+companionsRouter.get(
+  "/stats",
+  asyncHandler(async (_req, res) => {
+    const totalActiveCompanions = await prisma.companion.count({
+      where: {
+        status: CompanionStatus.ACTIVE,
+        verificationStatus: VerificationStatus.VERIFIED,
+        moderationStatus: PartnerModerationStatus.ACTIVE,
+      },
+    });
+
+    res.json({ totalActiveCompanions });
+  }),
+);
+
+companionsRouter.get(
+  "/home-visits",
+  asyncHandler(async (_req, res) => {
+    const companions = await prisma.companion.findMany({
+      where: {
+        status: CompanionStatus.ACTIVE,
+        verificationStatus: VerificationStatus.VERIFIED,
+        moderationStatus: PartnerModerationStatus.ACTIVE,
+        homeVisitVerificationStatus: HomeVisitVerificationStatus.APPROVED,
+      },
+      orderBy: [{ isOnline: "desc" }, { rating: "desc" }],
+      include: {
+        partnerApplications: {
+          where: { homeVisitRequested: true },
           orderBy: { createdAt: "desc" },
           take: 1,
           select: { selfieUrl: true },
@@ -223,20 +285,6 @@ companionsRouter.get(
 );
 
 companionsRouter.get(
-  "/stats",
-  asyncHandler(async (_req, res) => {
-    const totalActiveCompanions = await prisma.companion.count({
-      where: {
-        status: CompanionStatus.ACTIVE,
-        verificationStatus: VerificationStatus.VERIFIED,
-      },
-    });
-
-    res.json({ totalActiveCompanions });
-  }),
-);
-
-companionsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
     const companionId = String(req.params.id);
@@ -246,6 +294,7 @@ companionsRouter.get(
           id: companionId,
           status: CompanionStatus.ACTIVE,
           verificationStatus: VerificationStatus.VERIFIED,
+          moderationStatus: PartnerModerationStatus.ACTIVE,
         },
         include: {
           _count: {

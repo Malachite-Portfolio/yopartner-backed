@@ -7,6 +7,7 @@ import { requireAuth } from "../middlewares/auth";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { HttpError } from "../utils/http";
+import { assertUserCanAddMoney } from "../utils/moderation";
 
 const gstRate = 0.18;
 const razorpayOrdersUrl = "https://api.razorpay.com/v1/orders";
@@ -116,6 +117,12 @@ paymentsRouter.post(
   asyncHandler(async (req, res) => {
     ensureRazorpayConfigured();
     const authUser = req.authUser!;
+    const user = await prisma.user.findUnique({
+      where: { id: authUser.id },
+      select: { moderationStatus: true, moderationExpiresAt: true },
+    });
+    if (!user) throw new HttpError(404, "User not found.");
+    assertUserCanAddMoney(user);
     const body = razorpayOrderSchema.parse(req.body);
     const quote = assertRechargeQuote(body);
 
@@ -198,6 +205,12 @@ paymentsRouter.post(
   asyncHandler(async (req, res) => {
     ensureRazorpayConfigured();
     const authUser = req.authUser!;
+    const user = await prisma.user.findUnique({
+      where: { id: authUser.id },
+      select: { moderationStatus: true, moderationExpiresAt: true },
+    });
+    if (!user) throw new HttpError(404, "User not found.");
+    assertUserCanAddMoney(user);
     const body = razorpayVerifySchema.parse(req.body);
     const quote = assertRechargeQuote(body);
 
