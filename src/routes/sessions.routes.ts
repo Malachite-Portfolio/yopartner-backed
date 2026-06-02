@@ -122,6 +122,45 @@ function splitAmount(grossAmount: number, partnerPercent: number, companyPercent
   };
 }
 
+function getSessionRatePerMinute(session: {
+  amount: number;
+  serviceType: ServiceType;
+  companion?: {
+    chatPrice?: number | null;
+    audioPrice?: number | null;
+    videoPrice?: number | null;
+  } | null;
+}) {
+  const companion = session.companion;
+  const rate =
+    session.serviceType === ServiceType.CHAT
+      ? companion?.chatPrice
+      : session.serviceType === ServiceType.AUDIO
+        ? companion?.audioPrice
+        : companion?.videoPrice;
+  const parsedRate = Number(rate);
+  if (Number.isFinite(parsedRate) && parsedRate > 0) return Math.round(parsedRate);
+  return Math.max(0, Math.round(Number(session.amount) || 0));
+}
+
+function calculateSessionCharge(session: {
+  amount: number;
+  serviceType: ServiceType;
+  companion?: {
+    chatPrice?: number | null;
+    audioPrice?: number | null;
+    videoPrice?: number | null;
+  } | null;
+}, durationSeconds: number) {
+  const ratePerMinute = getSessionRatePerMinute(session);
+  const billableMinutes = Math.max(1, Math.ceil(Math.max(1, durationSeconds) / 60));
+  return {
+    ratePerMinute,
+    billableMinutes,
+    totalCharge: billableMinutes * ratePerMinute,
+  };
+}
+
 function buildGiftMessageBody(gift: {
   key: string;
   name: string;
@@ -1002,9 +1041,10 @@ const endSessionHandler = asyncHandler(async (req, res) => {
   const durationSeconds = session.startedAt
     ? Math.max(1, Math.floor((now.getTime() - session.startedAt.getTime()) / 1000))
     : session.durationSeconds;
-  const sessionSplit = splitAmount(session.amount, 30, 70);
+  const billing = calculateSessionCharge(session, durationSeconds);
+  const sessionSplit = splitAmount(billing.totalCharge, 30, 70);
   const companionEarning = Math.max(0, Math.round(sessionSplit.partnerAmount));
-  const platformFee = session.amount - companionEarning;
+  const platformFee = billing.totalCharge - companionEarning;
 
   const updated = await prisma.$transaction(async (tx) => {
     const markEnded = await tx.session.updateMany({
@@ -1017,6 +1057,7 @@ const endSessionHandler = asyncHandler(async (req, res) => {
         endedAt: now,
         endedByUserId: authUser.id,
         durationSeconds,
+        amount: billing.totalCharge,
         companionEarning,
         platformFee,
       },
@@ -1030,9 +1071,9 @@ const endSessionHandler = asyncHandler(async (req, res) => {
       return latest;
     }
 
-    let chargeSucceeded = session.amount <= 0;
+    let chargeSucceeded = billing.totalCharge <= 0;
 
-    if (session.amount > 0) {
+    if (billing.totalCharge > 0) {
       const wallet = await tx.walletAccount.upsert({
         where: { userId: session.userId },
         update: {},
@@ -1053,10 +1094,10 @@ const endSessionHandler = asyncHandler(async (req, res) => {
         const debited = await tx.walletAccount.updateMany({
           where: {
             id: wallet.id,
-            balance: { gte: session.amount },
+            balance: { gte: billing.totalCharge },
           },
           data: {
-            balance: { decrement: session.amount },
+            balance: { decrement: billing.totalCharge },
           },
         });
 
@@ -1066,10 +1107,10 @@ const endSessionHandler = asyncHandler(async (req, res) => {
               transactionCode: createCode("TXN"),
               walletAccountId: wallet.id,
               type: TransactionType.BOOKING,
-              amount: -session.amount,
+              amount: -billing.totalCharge,
               status: TransactionStatus.SUCCESS,
               referenceId: session.id,
-              reason: `Session charge for ${session.sessionCode} (${session.serviceType})`,
+              reason: `Session charge for ${session.sessionCode} (${session.serviceType}) - ${billing.billableMinutes} min x INR ${billing.ratePerMinute}`,
             },
           });
           chargeSucceeded = true;
@@ -1079,10 +1120,10 @@ const endSessionHandler = asyncHandler(async (req, res) => {
               transactionCode: createCode("TXN"),
               walletAccountId: wallet.id,
               type: TransactionType.BOOKING,
-              amount: -session.amount,
+              amount: -billing.totalCharge,
               status: TransactionStatus.FAILED,
               referenceId: session.id,
-              reason: `Session charge failed (insufficient balance) for ${session.sessionCode} (${session.serviceType})`,
+              reason: `Session charge failed (insufficient balance) for ${session.sessionCode} (${session.serviceType}) - ${billing.billableMinutes} min x INR ${billing.ratePerMinute}`,
             },
           });
           chargeSucceeded = false;
