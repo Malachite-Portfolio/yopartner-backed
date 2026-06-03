@@ -11,6 +11,7 @@ const envSchema = z.object({
   FIREBASE_ADMIN_PROJECT_ID: z.string().optional().default(""),
   FIREBASE_ADMIN_CLIENT_EMAIL: z.string().optional().default(""),
   FIREBASE_ADMIN_PRIVATE_KEY: z.string().optional().default(""),
+  FIREBASE_STORAGE_BUCKET: z.string().optional().default(""),
   ADMIN_UID_ALLOWLIST: z.string().optional(),
   ADMIN_PHONE_ALLOWLIST: z.string().optional(),
   ADMIN_LOGIN_ID: z.string().optional(),

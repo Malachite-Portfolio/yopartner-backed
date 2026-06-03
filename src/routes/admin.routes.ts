@@ -20,6 +20,7 @@ import { requireAdminAccess } from "../middlewares/adminAccess";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { createCode, HttpError } from "../utils/http";
+import { firebaseAdminStorage } from "../config/firebaseAdmin";
 import {
   isPartnerTemporaryStatus,
   isUserTemporaryStatus,
@@ -40,6 +41,7 @@ export const adminRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 const MAX_MANUAL_WALLET_CREDIT_AMOUNT = 10_000;
+const KYC_STORAGE_PREFIX = "YoPartner/partner-kyc/";
 
 adminRouter.use(requireAdminAccess);
 
@@ -47,6 +49,101 @@ const DEMO_PARTNER_FIREBASE_UID = "demo-host-4455667788";
 const shouldExcludeDemoPartner =
   process.env.NEXT_PUBLIC_CLIENT_DEMO_ENABLED !== "true" &&
   process.env.CLIENT_DEMO_ENABLED !== "true";
+
+type KycDocumentType = "selfie" | "aadhaarFront" | "aadhaarBack" | "pan";
+
+const kycDocumentFields: Record<KycDocumentType, {
+  uploadedField: "selfieUploaded" | "aadhaarFrontUploaded" | "aadhaarBackUploaded" | "panUploaded";
+  storagePathField: "selfieStoragePath" | "aadhaarFrontStoragePath" | "aadhaarBackStoragePath" | "panStoragePath";
+  urlField: "selfieUrl" | "aadhaarFrontUrl" | "aadhaarBackUrl" | "panUrl";
+  fileNameField: "selfieFileName" | "aadhaarFrontFileName" | "aadhaarBackFileName" | "panFileName";
+}> = {
+  selfie: {
+    uploadedField: "selfieUploaded",
+    storagePathField: "selfieStoragePath",
+    urlField: "selfieUrl",
+    fileNameField: "selfieFileName",
+  },
+  aadhaarFront: {
+    uploadedField: "aadhaarFrontUploaded",
+    storagePathField: "aadhaarFrontStoragePath",
+    urlField: "aadhaarFrontUrl",
+    fileNameField: "aadhaarFrontFileName",
+  },
+  aadhaarBack: {
+    uploadedField: "aadhaarBackUploaded",
+    storagePathField: "aadhaarBackStoragePath",
+    urlField: "aadhaarBackUrl",
+    fileNameField: "aadhaarBackFileName",
+  },
+  pan: {
+    uploadedField: "panUploaded",
+    storagePathField: "panStoragePath",
+    urlField: "panUrl",
+    fileNameField: "panFileName",
+  },
+};
+
+function parseKycDocumentType(value: unknown): KycDocumentType | null {
+  if (value === "selfie" || value === "aadhaarFront" || value === "aadhaarBack" || value === "pan") return value;
+  return null;
+}
+
+function parseFirebaseStorageUrl(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.hostname === "firebasestorage.googleapis.com") {
+      const match = url.pathname.match(/^\/v0\/b\/([^/]+)\/o\/(.+)$/);
+      if (!match) return null;
+      return {
+        bucketName: decodeURIComponent(match[1]),
+        objectPath: decodeURIComponent(match[2]),
+      };
+    }
+    if (url.hostname === "storage.googleapis.com") {
+      const [, bucketName, ...pathParts] = url.pathname.split("/");
+      if (!bucketName || pathParts.length === 0) return null;
+      return {
+        bucketName: decodeURIComponent(bucketName),
+        objectPath: decodeURIComponent(pathParts.join("/")),
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function resolveKycStorageObject(storagePath: string | null, url: string | null) {
+  const normalizedStoragePath = storagePath?.trim() ?? "";
+  if (normalizedStoragePath.startsWith("gs://")) {
+    const withoutScheme = normalizedStoragePath.slice("gs://".length);
+    const slashIndex = withoutScheme.indexOf("/");
+    if (slashIndex > 0) {
+      return {
+        bucketName: withoutScheme.slice(0, slashIndex),
+        objectPath: withoutScheme.slice(slashIndex + 1),
+      };
+    }
+  }
+
+  if (normalizedStoragePath && !/^https?:\/\//i.test(normalizedStoragePath)) {
+    return {
+      bucketName: null,
+      objectPath: normalizedStoragePath.replace(/^\/+/, ""),
+    };
+  }
+
+  const parsedUrl = url ? parseFirebaseStorageUrl(url) : null;
+  if (parsedUrl) return parsedUrl;
+
+  if (normalizedStoragePath) {
+    const parsedStoragePathUrl = parseFirebaseStorageUrl(normalizedStoragePath);
+    if (parsedStoragePathUrl) return parsedStoragePathUrl;
+  }
+
+  return null;
+}
 
 function withFixedCompanionPrices<T extends { chatPrice?: number; audioPrice?: number; videoPrice?: number }>(companion: T) {
   return {
@@ -724,6 +821,76 @@ adminRouter.get(
     });
     if (!application) throw new HttpError(404, "Application not found.");
     res.json({ application: withFixedApplicationPrices(application) });
+  }),
+);
+
+adminRouter.get(
+  "/kyc-documents/:applicationId/:documentType/preview",
+  asyncHandler(async (req, res) => {
+    const documentType = parseKycDocumentType(req.params.documentType);
+    if (!documentType) throw new HttpError(400, "Unsupported KYC document type.");
+    if (!firebaseAdminStorage) {
+      throw new HttpError(503, "KYC preview storage is not configured.");
+    }
+
+    const fields = kycDocumentFields[documentType];
+    const application = await prisma.partnerApplication.findUnique({
+      where: { id: String(req.params.applicationId) },
+      select: {
+        selfieUploaded: true,
+        selfieFileName: true,
+        selfieStoragePath: true,
+        selfieUrl: true,
+        aadhaarFrontUploaded: true,
+        aadhaarFrontFileName: true,
+        aadhaarFrontStoragePath: true,
+        aadhaarFrontUrl: true,
+        aadhaarBackUploaded: true,
+        aadhaarBackFileName: true,
+        aadhaarBackStoragePath: true,
+        aadhaarBackUrl: true,
+        panUploaded: true,
+        panFileName: true,
+        panStoragePath: true,
+        panUrl: true,
+      },
+    });
+
+    if (!application) throw new HttpError(404, "Application not found.");
+    if (!application[fields.uploadedField]) throw new HttpError(404, "KYC document not uploaded.");
+
+    const storageObject = resolveKycStorageObject(
+      application[fields.storagePathField],
+      application[fields.urlField],
+    );
+    if (!storageObject?.objectPath) {
+      throw new HttpError(404, "KYC document storage path not found.");
+    }
+    if (!storageObject.objectPath.startsWith(KYC_STORAGE_PREFIX)) {
+      throw new HttpError(403, "KYC document path is not allowed.");
+    }
+
+    const bucket = storageObject.bucketName
+      ? firebaseAdminStorage.bucket(storageObject.bucketName)
+      : firebaseAdminStorage.bucket();
+    const file = bucket.file(storageObject.objectPath);
+    const [exists] = await file.exists();
+    if (!exists) throw new HttpError(404, "KYC document file not found.");
+
+    const [metadata] = await file.getMetadata();
+    const contentType = metadata.contentType || "application/octet-stream";
+
+    res.setHeader("Cache-Control", "no-store, private");
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+
+    await new Promise<void>((resolve, reject) => {
+      const stream = file.createReadStream();
+      stream.on("error", reject);
+      stream.on("end", resolve);
+      stream.pipe(res);
+    });
   }),
 );
 
