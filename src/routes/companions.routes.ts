@@ -181,24 +181,14 @@ companionsRouter.get(
           : {}),
       },
       orderBy: [{ isOnline: "desc" }, { rating: "desc" }],
-      include: {
-        partnerApplications: {
-          where: { selfieUrl: { not: null } },
-          orderBy: { createdAt: "desc" },
-          take: 1,
-          select: { selfieUrl: true },
-        },
-      },
     });
     const visibleCompanions = companions.filter((companion) => isCompanionVisibleForListing(companion));
 
     const busySet = await getBusyCompanionIds(visibleCompanions.map((companion) => companion.id));
     res.json({
       companions: visibleCompanions.map((companion) => {
-        const { partnerApplications } = companion;
         const isBusy = busySet.has(companion.id);
-        const resolvedProfileImageUrl = companion.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
-        return toPublicCompanionSummary(companion, resolvedProfileImageUrl, isBusy);
+        return toPublicCompanionSummary(companion, companion.profileImageUrl, isBusy);
       }),
     });
   }),
@@ -215,23 +205,13 @@ companionsRouter.get(
       },
       orderBy: [{ rating: "desc" }],
       take: 12,
-      include: {
-        partnerApplications: {
-          where: { selfieUrl: { not: null } },
-          orderBy: { createdAt: "desc" },
-          take: 1,
-          select: { selfieUrl: true },
-        },
-      },
     });
     const visibleCompanions = companions.filter((companion) => isCompanionVisibleForListing(companion));
     const busySet = await getBusyCompanionIds(visibleCompanions.map((companion) => companion.id));
     res.json({
       companions: visibleCompanions.map((companion) => {
-        const { partnerApplications } = companion;
         const isBusy = busySet.has(companion.id);
-        const resolvedProfileImageUrl = companion.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
-        return toPublicCompanionSummary(companion, resolvedProfileImageUrl, isBusy);
+        return toPublicCompanionSummary(companion, companion.profileImageUrl, isBusy);
       }),
     });
   }),
@@ -263,22 +243,12 @@ companionsRouter.get(
         homeVisitVerificationStatus: HomeVisitVerificationStatus.APPROVED,
       },
       orderBy: [{ isOnline: "desc" }, { rating: "desc" }],
-      include: {
-        partnerApplications: {
-          where: { homeVisitRequested: true },
-          orderBy: { createdAt: "desc" },
-          take: 1,
-          select: { selfieUrl: true },
-        },
-      },
     });
     const busySet = await getBusyCompanionIds(companions.map((companion) => companion.id));
     res.json({
       companions: companions.map((companion) => {
-        const { partnerApplications } = companion;
         const isBusy = busySet.has(companion.id);
-        const resolvedProfileImageUrl = companion.profileImageUrl ?? partnerApplications[0]?.selfieUrl ?? null;
-        return toPublicCompanionSummary(companion, resolvedProfileImageUrl, isBusy);
+        return toPublicCompanionSummary(companion, companion.profileImageUrl, isBusy);
       }),
     });
   }),
@@ -343,7 +313,6 @@ companionsRouter.get(
         hobbies: string[];
         aboutYourself: string | null;
         profileTagline: string | null;
-        selfieUrl: string | null;
       } | null = null;
 
       try {
@@ -366,7 +335,6 @@ companionsRouter.get(
             hobbies: true,
             aboutYourself: true,
             profileTagline: true,
-            selfieUrl: true,
           },
         });
       } catch (error) {
@@ -437,7 +405,7 @@ companionsRouter.get(
             .filter(Boolean),
         ),
       );
-      const profileImageUrl = sanitizePublicUrl(companion.profileImageUrl ?? latestProfile?.selfieUrl ?? null);
+      const profileImageUrl = sanitizePublicUrl(companion.profileImageUrl);
       const galleryUrls = sanitizePublicUrls(companion.galleryImageUrls);
       const city = cleanText(companion.city);
       const reviews = publicReviews
