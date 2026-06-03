@@ -10,6 +10,12 @@ import {
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { resolvePartnerModerationStatus } from "../utils/moderation";
+import {
+  AUDIO_RATE_PER_MIN,
+  CHAT_RATE_PER_MIN,
+  HOME_VISIT_RATE_PER_HOUR,
+  VIDEO_RATE_PER_MIN,
+} from "../config/platformPricing";
 
 export const companionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
@@ -55,12 +61,12 @@ function toPublicCompanionSummary(
     category: companion.category,
     languages: companion.languages,
     servicesOffered: companion.servicesOffered,
-    chatPrice: companion.chatPrice,
-    audioPrice: companion.audioPrice,
-    videoPrice: companion.videoPrice,
-    chatRate: companion.chatPrice,
-    audioRate: companion.audioPrice,
-    videoRate: companion.videoPrice,
+    chatPrice: CHAT_RATE_PER_MIN,
+    audioPrice: AUDIO_RATE_PER_MIN,
+    videoPrice: VIDEO_RATE_PER_MIN,
+    chatRate: CHAT_RATE_PER_MIN,
+    audioRate: AUDIO_RATE_PER_MIN,
+    videoRate: VIDEO_RATE_PER_MIN,
     rating: companion.rating,
     ratingAverage: companion.rating,
     profileImageUrl,
@@ -275,7 +281,7 @@ companionsRouter.get(
         },
       });
       if (!companion) {
-        res.status(404).json({ error: "NOT_FOUND", message: "Companion not found." });
+        res.status(404).json({ error: "NOT_FOUND", message: "Partner not found." });
         return;
       }
 
@@ -430,7 +436,7 @@ companionsRouter.get(
 
       const publicProfile = {
         id: companion.id,
-        displayName: fallbackName || cleanText(latestProfile?.fullName) || "Verified Companion",
+        displayName: fallbackName || cleanText(latestProfile?.fullName) || "Verified Partner",
         headline,
         bio,
         profileImageUrl,
@@ -445,10 +451,10 @@ companionsRouter.get(
         reviewCount: totalPublicReviewCount,
         completedSessions: _count.sessions,
         rates: {
-          chat: companion.chatPrice,
-          audio: companion.audioPrice,
-          video: companion.videoPrice,
-          homeVisit: null,
+          chat: CHAT_RATE_PER_MIN,
+          audio: AUDIO_RATE_PER_MIN,
+          video: VIDEO_RATE_PER_MIN,
+          homeVisit: companion.homeVisitVerificationStatus === HomeVisitVerificationStatus.APPROVED ? HOME_VISIT_RATE_PER_HOUR : null,
         },
         reviews,
       };

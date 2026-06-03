@@ -21,6 +21,7 @@ import {
   assertUserCanSendGifts,
   assertUserCanStartSession,
 } from "../utils/moderation";
+import { getFixedSessionRate } from "../config/platformPricing";
 
 const createSessionSchema = z.object({
   bookingId: z.string().optional(),
@@ -131,16 +132,7 @@ function getSessionRatePerMinute(session: {
     videoPrice?: number | null;
   } | null;
 }) {
-  const companion = session.companion;
-  const rate =
-    session.serviceType === ServiceType.CHAT
-      ? companion?.chatPrice
-      : session.serviceType === ServiceType.AUDIO
-        ? companion?.audioPrice
-        : companion?.videoPrice;
-  const parsedRate = Number(rate);
-  if (Number.isFinite(parsedRate) && parsedRate > 0) return Math.round(parsedRate);
-  return Math.max(0, Math.round(Number(session.amount) || 0));
+  return getFixedSessionRate(session.serviceType);
 }
 
 function calculateSessionCharge(session: {
@@ -367,7 +359,7 @@ function toSessionResponse(session: {
           id: (session.companion as { id: string }).id,
           name:
             (session.companion as { displayName?: string | null }).displayName ??
-            "Companion",
+            "Partner",
         }
       : null,
     agoraToken: null,
@@ -791,10 +783,10 @@ sessionsRouter.post(
     assertUserCanStartSession(requester);
 
     const companion = await prisma.companion.findUnique({ where: { id: body.companionId } });
-    if (!companion) throw new HttpError(404, "Companion not found.");
+    if (!companion) throw new HttpError(404, "Partner not found.");
     assertPartnerCanReceiveRequests(companion);
     if (companion.status !== CompanionStatus.ACTIVE || companion.verificationStatus !== VerificationStatus.VERIFIED) {
-      throw new HttpError(403, "Companion is not available for new sessions yet.");
+      throw new HttpError(403, "Partner is not available for new sessions yet.");
     }
     const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
     const activeChatBetweenPair = await prisma.session.findFirst({
@@ -821,7 +813,7 @@ sessionsRouter.post(
           : ServiceType.VIDEO;
 
     if (!companion.servicesOffered.includes(serviceType)) {
-      throw new HttpError(400, "This service is not offered by the selected companion.");
+      throw new HttpError(400, "This service is not offered by the selected partner.");
     }
 
     const existingPending = await prisma.session.findFirst({
@@ -914,12 +906,7 @@ sessionsRouter.post(
         endedAt: null,
         endedByUserId: null,
         lastHeartbeatAt: new Date(),
-        amount:
-          serviceType === ServiceType.CHAT
-            ? companion.chatPrice
-            : serviceType === ServiceType.AUDIO
-              ? companion.audioPrice
-              : companion.videoPrice,
+        amount: getFixedSessionRate(serviceType),
       },
     });
     res.status(201).json({

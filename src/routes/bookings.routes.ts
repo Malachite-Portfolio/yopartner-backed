@@ -6,6 +6,7 @@ import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { createCode, HttpError } from "../utils/http";
 import { assertPartnerCanReceiveRequests, assertUserCanStartSession } from "../utils/moderation";
+import { getFixedSessionRate } from "../config/platformPricing";
 
 const createBookingSchema = z.object({
   companionId: z.string().min(1),
@@ -44,7 +45,7 @@ bookingsRouter.post(
     const companion = await prisma.companion.findUnique({ where: { id: body.companionId } });
     if (companion) assertPartnerCanReceiveRequests(companion);
     if (!companion || companion.status !== "ACTIVE") {
-      throw new HttpError(404, "Companion not available.");
+      throw new HttpError(404, "Partner not available.");
     }
 
     const serviceType =
@@ -54,12 +55,7 @@ bookingsRouter.post(
           ? ServiceType.AUDIO
           : ServiceType.VIDEO;
 
-    const amount =
-      serviceType === ServiceType.CHAT
-        ? companion.chatPrice
-        : serviceType === ServiceType.AUDIO
-          ? companion.audioPrice
-          : companion.videoPrice;
+    const amount = getFixedSessionRate(serviceType);
 
     const wallet = await prisma.walletAccount.findUnique({ where: { userId: authUser.id } });
     if (!wallet) throw new HttpError(400, "Wallet account not found.");

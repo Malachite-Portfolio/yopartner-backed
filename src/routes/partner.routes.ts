@@ -19,6 +19,13 @@ import { HttpError } from "../utils/http";
 import { firebaseAdminAuth, isFirebaseAdminConfigured } from "../config/firebaseAdmin";
 import { env } from "../config/env";
 import { assertPartnerDashboardAccess } from "../utils/moderation";
+import {
+  AUDIO_RATE_PER_MIN,
+  CHAT_RATE_PER_MIN,
+  HOME_VISIT_RATE_PER_HOUR,
+  VIDEO_RATE_PER_MIN,
+  getFixedSessionRate,
+} from "../config/platformPricing";
 
 const onboardingSchema = z.object({
   fullName: z.string().min(2),
@@ -36,9 +43,9 @@ const onboardingSchema = z.object({
   profileTagline: z.string().min(6),
   aboutYourself: z.string().min(80),
   servicesOffered: z.array(z.string()).min(1),
-  chatPrice: z.coerce.number().int().nonnegative(),
-  audioPrice: z.coerce.number().int().nonnegative(),
-  videoPrice: z.coerce.number().int().nonnegative(),
+  chatPrice: z.coerce.number().int().nonnegative().optional(),
+  audioPrice: z.coerce.number().int().nonnegative().optional(),
+  videoPrice: z.coerce.number().int().nonnegative().optional(),
   homeVisitRequested: z.boolean().optional(),
   homeVisitPrice: z.coerce.number().int().nonnegative().optional(),
   categories: z.array(z.string()).min(1),
@@ -80,8 +87,6 @@ const partnerDeleteGalleryImageSchema = z.object({
   storagePath: z.string().min(1).max(500).optional(),
 });
 
-const MAX_CHAT_AUDIO_VIDEO_PRICE = 10000;
-const MAX_HOME_VISIT_PRICE = 100000;
 const MAX_GALLERY_IMAGES = 6;
 const STALE_LIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.LIVE, SessionStatus.ACCEPTED];
@@ -115,14 +120,6 @@ const toServiceType = (value: string): ServiceType | null => {
   if (normalized === "video" || normalized === "video call") return ServiceType.VIDEO;
   return null;
 };
-
-function normalizePriceValue(field: string, value: unknown, maxValue: number) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0 || parsed > maxValue) {
-    throw new HttpError(400, `${field} must be a valid number between 0 and ${maxValue}.`);
-  }
-  return parsed;
-}
 
 function sanitizeOptionalString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -180,13 +177,6 @@ partnerRouter.post(
         throw new HttpError(400, "At least one valid service is required.");
       }
 
-      const chatPrice = normalizePriceValue("chatPrice", payload.chatPrice, MAX_CHAT_AUDIO_VIDEO_PRICE);
-      const audioPrice = normalizePriceValue("audioPrice", payload.audioPrice, MAX_CHAT_AUDIO_VIDEO_PRICE);
-      const videoPrice = normalizePriceValue("videoPrice", payload.videoPrice, MAX_CHAT_AUDIO_VIDEO_PRICE);
-      if (payload.homeVisitPrice !== undefined) {
-        normalizePriceValue("homeVisitPrice", payload.homeVisitPrice, MAX_HOME_VISIT_PRICE);
-      }
-
       const selfie = sanitizeKycDocument({
         uploaded: payload.selfieUploaded,
         fileName: payload.selfieFileName,
@@ -230,14 +220,11 @@ partnerRouter.post(
           profileTagline: payload.profileTagline,
           aboutYourself: payload.aboutYourself,
           servicesOffered,
-          chatPrice,
-          audioPrice,
-          videoPrice,
+          chatPrice: CHAT_RATE_PER_MIN,
+          audioPrice: AUDIO_RATE_PER_MIN,
+          videoPrice: VIDEO_RATE_PER_MIN,
           homeVisitRequested: Boolean(payload.homeVisitRequested),
-          homeVisitPrice:
-            payload.homeVisitRequested && payload.homeVisitPrice !== undefined
-              ? payload.homeVisitPrice
-              : null,
+          homeVisitPrice: payload.homeVisitRequested ? HOME_VISIT_RATE_PER_HOUR : null,
           categories: payload.categories,
           safetyChecklist: payload.safetyChecklist,
           selfieUploaded: selfie.uploaded,
@@ -468,12 +455,7 @@ partnerRouter.get(
               memberPhoneMasked: maskPhoneNumber(session.user.phoneNumber),
               memberName: session.user.name ?? "Member",
               type: session.serviceType,
-              expectedRate:
-                session.serviceType === ServiceType.CHAT
-                  ? companion.chatPrice
-                  : session.serviceType === ServiceType.AUDIO
-                    ? companion.audioPrice
-                    : companion.videoPrice,
+              expectedRate: getFixedSessionRate(session.serviceType),
               startedAt: session.startedAt ? session.startedAt.toISOString() : null,
               status: session.status,
             },
@@ -487,12 +469,7 @@ partnerRouter.get(
         memberPhoneMasked: maskPhoneNumber(session.user.phoneNumber),
         memberName: session.user.name ?? "Member",
         type: session.serviceType,
-        expectedRate:
-          session.serviceType === ServiceType.CHAT
-            ? companion.chatPrice
-            : session.serviceType === ServiceType.AUDIO
-              ? companion.audioPrice
-              : companion.videoPrice,
+        expectedRate: getFixedSessionRate(session.serviceType),
         createdAt: session.createdAt.toISOString(),
       }));
     }
@@ -592,12 +569,7 @@ partnerRouter.get(
         memberPhoneMasked: maskPhoneNumber(session.user.phoneNumber),
         memberName: session.user.name ?? "Member",
         type: session.serviceType,
-        expectedRate:
-          session.serviceType === ServiceType.CHAT
-            ? companion.chatPrice
-            : session.serviceType === ServiceType.AUDIO
-              ? companion.audioPrice
-              : companion.videoPrice,
+        expectedRate: getFixedSessionRate(session.serviceType),
         createdAt: session.createdAt.toISOString(),
       })),
     });
@@ -782,7 +754,7 @@ partnerRouter.post(
     });
     assertPartnerDashboardAccess(companion);
     if (!companion) {
-      throw new HttpError(404, "Companion profile not found.");
+      throw new HttpError(404, "Partner profile not found.");
     }
 
     const updated = await prisma.companion.update({
@@ -810,7 +782,7 @@ partnerRouter.post(
     });
     assertPartnerDashboardAccess(companion);
     if (!companion) {
-      throw new HttpError(404, "Companion profile not found.");
+      throw new HttpError(404, "Partner profile not found.");
     }
 
     const updated = await prisma.companion.update({
@@ -839,7 +811,7 @@ partnerRouter.post(
     });
     assertPartnerDashboardAccess(companion);
     if (!companion) {
-      throw new HttpError(404, "Companion profile not found.");
+      throw new HttpError(404, "Partner profile not found.");
     }
 
     const updated = await prisma.companion.update({
@@ -918,7 +890,7 @@ partnerRouter.patch(
     });
     assertPartnerDashboardAccess(companion);
     if (!companion) {
-      throw new HttpError(404, "Companion profile not found.");
+      throw new HttpError(404, "Partner profile not found.");
     }
 
     const updated = await prisma.companion.update({
@@ -957,7 +929,7 @@ partnerRouter.get(
     assertPartnerDashboardAccess(companion);
 
     if (!companion) {
-      throw new HttpError(404, "Companion profile not found.");
+      throw new HttpError(404, "Partner profile not found.");
     }
 
     const latestApplicationWithSelfie = await prisma.partnerApplication.findFirst({
@@ -1000,7 +972,7 @@ partnerRouter.put(
     });
     assertPartnerDashboardAccess(companion);
     if (!companion) {
-      throw new HttpError(404, "Companion profile not found.");
+      throw new HttpError(404, "Partner profile not found.");
     }
 
     const updated = await prisma.companion.update({
@@ -1041,7 +1013,7 @@ partnerRouter.post(
     });
     assertPartnerDashboardAccess(companion);
     if (!companion) {
-      throw new HttpError(404, "Companion profile not found.");
+      throw new HttpError(404, "Partner profile not found.");
     }
 
     const existingIndexByPath = companion.galleryImageStoragePaths.findIndex((path) => path === payload.storagePath);
@@ -1106,7 +1078,7 @@ partnerRouter.delete(
     });
     assertPartnerDashboardAccess(companion);
     if (!companion) {
-      throw new HttpError(404, "Companion profile not found.");
+      throw new HttpError(404, "Partner profile not found.");
     }
 
     const matchIndex = companion.galleryImageUrls.findIndex((url, index) => {

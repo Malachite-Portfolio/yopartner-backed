@@ -29,6 +29,12 @@ import {
   toPartnerOffline,
   toUserBlocked,
 } from "../utils/moderation";
+import {
+  AUDIO_RATE_PER_MIN,
+  CHAT_RATE_PER_MIN,
+  HOME_VISIT_RATE_PER_HOUR,
+  VIDEO_RATE_PER_MIN,
+} from "../config/platformPricing";
 
 export const adminRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
@@ -41,6 +47,35 @@ const DEMO_PARTNER_FIREBASE_UID = "demo-host-4455667788";
 const shouldExcludeDemoPartner =
   process.env.NEXT_PUBLIC_CLIENT_DEMO_ENABLED !== "true" &&
   process.env.CLIENT_DEMO_ENABLED !== "true";
+
+function withFixedCompanionPrices<T extends { chatPrice?: number; audioPrice?: number; videoPrice?: number }>(companion: T) {
+  return {
+    ...companion,
+    chatPrice: CHAT_RATE_PER_MIN,
+    audioPrice: AUDIO_RATE_PER_MIN,
+    videoPrice: VIDEO_RATE_PER_MIN,
+  };
+}
+
+function withFixedApplicationPrices<
+  T extends {
+    chatPrice?: number;
+    audioPrice?: number;
+    videoPrice?: number;
+    homeVisitRequested?: boolean;
+    homeVisitPrice?: number | null;
+    companion?: ({ chatPrice?: number; audioPrice?: number; videoPrice?: number } | null);
+  },
+>(application: T) {
+  return {
+    ...application,
+    chatPrice: CHAT_RATE_PER_MIN,
+    audioPrice: AUDIO_RATE_PER_MIN,
+    videoPrice: VIDEO_RATE_PER_MIN,
+    homeVisitPrice: application.homeVisitRequested ? HOME_VISIT_RATE_PER_HOUR : null,
+    companion: application.companion ? withFixedCompanionPrices(application.companion) : null,
+  };
+}
 
 function parseTransactionType(value: unknown): TransactionType | null {
   if (typeof value !== "string") return null;
@@ -357,7 +392,7 @@ adminRouter.get(
         const isBusy = busySet.has(companion.id);
         const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
         return {
-          ...companion,
+          ...withFixedCompanionPrices(companion),
           moderationStatus: resolvePartnerModerationStatus(companion),
           isBusy,
           effectiveStatus,
@@ -614,7 +649,7 @@ adminRouter.get(
       },
       orderBy: { createdAt: "desc" },
     });
-    res.json({ applications });
+    res.json({ applications: applications.map(withFixedApplicationPrices) });
   }),
 );
 
@@ -688,7 +723,7 @@ adminRouter.get(
       },
     });
     if (!application) throw new HttpError(404, "Application not found.");
-    res.json({ application });
+    res.json({ application: withFixedApplicationPrices(application) });
   }),
 );
 
@@ -734,6 +769,9 @@ adminRouter.patch(
             data: {
               status: CompanionStatus.ACTIVE,
               verificationStatus: VerificationStatus.VERIFIED,
+              chatPrice: CHAT_RATE_PER_MIN,
+              audioPrice: AUDIO_RATE_PER_MIN,
+              videoPrice: VIDEO_RATE_PER_MIN,
               homeVisitVerificationStatus: application.homeVisitRequested
                 ? HomeVisitVerificationStatus.PENDING
                 : companion.homeVisitVerificationStatus,
@@ -749,9 +787,9 @@ adminRouter.patch(
               category: application.categories[0] ?? null,
               languages: application.languagesKnown,
               servicesOffered: application.servicesOffered,
-              chatPrice: application.chatPrice,
-              audioPrice: application.audioPrice,
-              videoPrice: application.videoPrice,
+              chatPrice: CHAT_RATE_PER_MIN,
+              audioPrice: AUDIO_RATE_PER_MIN,
+              videoPrice: VIDEO_RATE_PER_MIN,
               status: CompanionStatus.ACTIVE,
               verificationStatus: VerificationStatus.VERIFIED,
               homeVisitVerificationStatus: application.homeVisitRequested
@@ -1208,7 +1246,7 @@ adminRouter.get(
             ? {
                 applicationId: latestApplication.id,
                 homeVisitRequested: latestApplication.homeVisitRequested,
-                homeVisitPrice: latestApplication.homeVisitPrice,
+                homeVisitPrice: latestApplication.homeVisitRequested ? HOME_VISIT_RATE_PER_HOUR : null,
                 city: latestApplication.bornCity,
                 languages: latestApplication.languagesKnown,
                 categories: latestApplication.categories,
@@ -1229,7 +1267,7 @@ adminRouter.patch(
   "/home-visit-verifications/:id/status",
   asyncHandler(async (req, res) => {
     const companionId = String(req.params.id ?? "").trim();
-    if (!companionId) throw new HttpError(400, "Companion ID is required.");
+    if (!companionId) throw new HttpError(400, "Partner ID is required.");
 
     const nextStatus = parseHomeVisitVerificationStatus(req.body?.status);
     if (!nextStatus) {
@@ -1240,7 +1278,7 @@ adminRouter.patch(
     if (!reason) throw new HttpError(400, "reason is required.");
 
     const companion = await prisma.companion.findUnique({ where: { id: companionId } });
-    if (!companion) throw new HttpError(404, "Companion not found.");
+    if (!companion) throw new HttpError(404, "Partner not found.");
 
     const updated = await prisma.$transaction(async (tx) => {
       const next = await tx.companion.update({
