@@ -910,78 +910,106 @@ adminRouter.patch(
     const application = await prisma.partnerApplication.findUnique({ where: { id: String(req.params.id) } });
     if (!application) throw new HttpError(404, "Application not found.");
 
-    const updated = await prisma.$transaction(async (tx) => {
-      const next = await tx.partnerApplication.update({
-        where: { id: application.id },
-        data: {
-          status,
-          ...(typeof req.body.adminNote === "string" ? { adminNote: req.body.adminNote } : {}),
-        },
-      });
-
-      if (status === PartnerApplicationStatus.APPROVED) {
-        await tx.user.update({
-          where: { id: application.applicantUserId },
-          data: { role: Role.PARTNER },
+    let updated: Awaited<ReturnType<typeof prisma.partnerApplication.findUniqueOrThrow>>;
+    try {
+      updated = await prisma.$transaction(async (tx) => {
+        const next = await tx.partnerApplication.update({
+          where: { id: application.id },
+          data: {
+            status,
+            ...(typeof req.body.adminNote === "string" ? { adminNote: req.body.adminNote } : {}),
+          },
         });
 
-        const companion =
-          application.companionId
-            ? await tx.companion.findUnique({ where: { id: application.companionId } })
-            : null;
+        if (status === PartnerApplicationStatus.APPROVED) {
+          await tx.user.update({
+            where: { id: application.applicantUserId },
+            data: { role: Role.PARTNER },
+          });
 
-        if (companion) {
-          await tx.companion.update({
-            where: { id: companion.id },
-            data: {
-              status: CompanionStatus.ACTIVE,
-              verificationStatus: VerificationStatus.VERIFIED,
-              chatPrice: CHAT_RATE_PER_MIN,
-              audioPrice: AUDIO_RATE_PER_MIN,
-              videoPrice: VIDEO_RATE_PER_MIN,
-              homeVisitVerificationStatus: application.homeVisitRequested
-                ? HomeVisitVerificationStatus.PENDING
-                : companion.homeVisitVerificationStatus,
-            },
-          });
+          const companion =
+            application.companionId
+              ? await tx.companion.findUnique({ where: { id: application.companionId } })
+              : await tx.companion.findUnique({ where: { userId: application.applicantUserId } });
+
+          if (companion) {
+            await tx.companion.update({
+              where: { id: companion.id },
+              data: {
+                status: CompanionStatus.ACTIVE,
+                verificationStatus: VerificationStatus.VERIFIED,
+                chatPrice: CHAT_RATE_PER_MIN,
+                audioPrice: AUDIO_RATE_PER_MIN,
+                videoPrice: VIDEO_RATE_PER_MIN,
+                homeVisitVerificationStatus: application.homeVisitRequested
+                  ? HomeVisitVerificationStatus.PENDING
+                  : companion.homeVisitVerificationStatus,
+              },
+            });
+            if (!application.companionId || application.companionId !== companion.id) {
+              await tx.partnerApplication.update({
+                where: { id: application.id },
+                data: { companionId: companion.id },
+              });
+            }
+          } else {
+            const createdCompanion = await tx.companion.create({
+              data: {
+                userId: application.applicantUserId,
+                displayName: application.fullName,
+                tagline: application.profileTagline,
+                city: application.bornCity,
+                category: application.categories[0] ?? null,
+                languages: application.languagesKnown,
+                servicesOffered: application.servicesOffered,
+                chatPrice: CHAT_RATE_PER_MIN,
+                audioPrice: AUDIO_RATE_PER_MIN,
+                videoPrice: VIDEO_RATE_PER_MIN,
+                status: CompanionStatus.ACTIVE,
+                verificationStatus: VerificationStatus.VERIFIED,
+                homeVisitVerificationStatus: application.homeVisitRequested
+                  ? HomeVisitVerificationStatus.PENDING
+                  : HomeVisitVerificationStatus.NOT_SUBMITTED,
+              },
+            });
+            await tx.partnerApplication.update({
+              where: { id: application.id },
+              data: { companionId: createdCompanion.id },
+            });
+          }
         } else {
-          const createdCompanion = await tx.companion.create({
-            data: {
-              userId: application.applicantUserId,
-              displayName: application.fullName,
-              tagline: application.profileTagline,
-              city: application.bornCity,
-              category: application.categories[0] ?? null,
-              languages: application.languagesKnown,
-              servicesOffered: application.servicesOffered,
-              chatPrice: CHAT_RATE_PER_MIN,
-              audioPrice: AUDIO_RATE_PER_MIN,
-              videoPrice: VIDEO_RATE_PER_MIN,
-              status: CompanionStatus.ACTIVE,
-              verificationStatus: VerificationStatus.VERIFIED,
-              homeVisitVerificationStatus: application.homeVisitRequested
-                ? HomeVisitVerificationStatus.PENDING
-                : HomeVisitVerificationStatus.NOT_SUBMITTED,
-            },
-          });
-          await tx.partnerApplication.update({
-            where: { id: application.id },
-            data: { companionId: createdCompanion.id },
-          });
+          if (application.companionId) {
+            await tx.companion.update({
+              where: { id: application.companionId },
+              data: {
+                status: CompanionStatus.UNDER_REVIEW,
+                verificationStatus: VerificationStatus.PENDING,
+              },
+            });
+          }
         }
-      } else {
-        if (application.companionId) {
-          await tx.companion.update({
-            where: { id: application.companionId },
-            data: {
-              status: CompanionStatus.UNDER_REVIEW,
-              verificationStatus: VerificationStatus.PENDING,
-            },
-          });
+
+        return tx.partnerApplication.findUniqueOrThrow({
+          where: { id: next.id },
+          include: { companion: true },
+        });
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === "P2002") {
+          throw new HttpError(409, "This applicant already has a partner profile. Please refresh and try approval again.");
+        }
+        if (error.code === "P2025") {
+          throw new HttpError(404, "Required applicant or partner record was not found. Please refresh and try again.");
         }
       }
-      return next;
-    });
+      console.error("[admin] application status update failed", {
+        applicationId: application.id,
+        status,
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+      throw new HttpError(500, "Unable to update application status. Please retry or contact support.");
+    }
 
     res.json({ application: updated });
   }),
