@@ -104,7 +104,7 @@ export const sessionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
-const MIN_CHAT_WALLET_BALANCE = 50;
+const INSUFFICIENT_WALLET_BALANCE_CODE = "INSUFFICIENT_WALLET_BALANCE";
 
 function roundToTwo(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
@@ -133,6 +133,10 @@ function getSessionRatePerMinute(session: {
   } | null;
 }) {
   return getFixedSessionRate(session.serviceType);
+}
+
+function getMinimumWalletBalanceForSession(serviceType: ServiceType) {
+  return getFixedSessionRate(serviceType);
 }
 
 function calculateSessionCharge(session: {
@@ -816,22 +820,6 @@ sessionsRouter.post(
       throw new HttpError(400, "This service is not offered by the selected partner.");
     }
 
-    const existingPending = await prisma.session.findFirst({
-      where: {
-        userId: authUser.id,
-        companionId: companion.id,
-        serviceType,
-        status: SessionStatus.PENDING,
-      },
-      orderBy: { createdAt: "desc" },
-    });
-    if (existingPending) {
-      res.status(200).json({
-        session: toSessionResponse(existingPending, authUser.id),
-      });
-      return;
-    }
-
     const existingActiveForUser = await prisma.session.findFirst({
       where: {
         userId: authUser.id,
@@ -850,20 +838,38 @@ sessionsRouter.post(
       return;
     }
 
-    if (serviceType === ServiceType.CHAT) {
-      const wallet = await prisma.walletAccount.upsert({
-        where: { userId: authUser.id },
-        update: {},
-        create: { userId: authUser.id },
-      });
+    const minimumWalletBalance = getMinimumWalletBalanceForSession(serviceType);
+    const wallet = await prisma.walletAccount.upsert({
+      where: { userId: authUser.id },
+      update: {},
+      create: { userId: authUser.id },
+    });
 
-      if (wallet.balance < MIN_CHAT_WALLET_BALANCE) {
-        res.status(402).json({
-          error: "INSUFFICIENT_WALLET_BALANCE",
-          message: "Minimum ₹50 wallet balance is required to start a chat.",
-        });
-        return;
-      }
+    if (wallet.balance < minimumWalletBalance) {
+      res.status(402).json({
+        error: INSUFFICIENT_WALLET_BALANCE_CODE,
+        code: INSUFFICIENT_WALLET_BALANCE_CODE,
+        message: "Please add money to continue.",
+        requiredBalance: minimumWalletBalance,
+        walletBalance: wallet.balance,
+      });
+      return;
+    }
+
+    const existingPending = await prisma.session.findFirst({
+      where: {
+        userId: authUser.id,
+        companionId: companion.id,
+        serviceType,
+        status: SessionStatus.PENDING,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (existingPending) {
+      res.status(200).json({
+        session: toSessionResponse(existingPending, authUser.id),
+      });
+      return;
     }
 
     await prisma.session.updateMany({

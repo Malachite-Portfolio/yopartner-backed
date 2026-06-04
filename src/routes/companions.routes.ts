@@ -49,7 +49,7 @@ function toPublicCompanionSummary(
   isBusy: boolean,
 ) {
   const effectiveOnline = isPresenceFresh(companion);
-  const effectiveStatus = !effectiveOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+  const effectiveStatus = isBusy ? "BUSY" : effectiveOnline ? "ONLINE" : "OFFLINE";
   const profileImageUrl = companion.profileImageUrl ?? profileImageFallback ?? null;
 
   return {
@@ -174,7 +174,6 @@ companionsRouter.get(
         status: CompanionStatus.ACTIVE,
         verificationStatus: VerificationStatus.VERIFIED,
         moderationStatus: { notIn: [PartnerModerationStatus.BANNED, PartnerModerationStatus.TEMP_BANNED, PartnerModerationStatus.HIDDEN] },
-        ...(online ? { isOnline: true } : {}),
         ...(category ? { category: { equals: category, mode: "insensitive" } } : {}),
         ...(search
           ? {
@@ -191,11 +190,12 @@ companionsRouter.get(
     const visibleCompanions = companions.filter((companion) => isCompanionVisibleForListing(companion));
 
     const busySet = await getBusyCompanionIds(visibleCompanions.map((companion) => companion.id));
+    const summaries = visibleCompanions.map((companion) => {
+      const isBusy = busySet.has(companion.id);
+      return toPublicCompanionSummary(companion, companion.profileImageUrl, isBusy);
+    });
     res.json({
-      companions: visibleCompanions.map((companion) => {
-        const isBusy = busySet.has(companion.id);
-        return toPublicCompanionSummary(companion, companion.profileImageUrl, isBusy);
-      }),
+      companions: online ? summaries.filter((companion) => companion.effectiveStatus !== "OFFLINE") : summaries,
     });
   }),
 );

@@ -97,6 +97,40 @@ function isPartnerPresenceFresh(companion: { isOnline: boolean; updatedAt: Date 
   return Date.now() - companion.updatedAt.getTime() <= PARTNER_PRESENCE_STALE_MS;
 }
 
+function resolveEffectiveStatus(params: { isBusy: boolean; presenceFresh: boolean }) {
+  if (params.isBusy) return "BUSY";
+  if (params.presenceFresh) return "ONLINE";
+  return "OFFLINE";
+}
+
+async function hasActiveCompanionSession(companionId: string) {
+  const staleThreshold = new Date(Date.now() - STALE_LIVE_SESSION_MS);
+  await prisma.session.updateMany({
+    where: {
+      companionId,
+      status: { in: ACTIVE_SESSION_STATUSES },
+      endedAt: null,
+      updatedAt: { lt: staleThreshold },
+    },
+    data: {
+      status: SessionStatus.EXPIRED,
+      endedAt: new Date(),
+    },
+  });
+
+  const active = await prisma.session.findFirst({
+    where: {
+      companionId,
+      status: { in: ACTIVE_SESSION_STATUSES },
+      endedAt: null,
+      updatedAt: { gte: staleThreshold },
+    },
+    select: { id: true },
+  });
+
+  return Boolean(active);
+}
+
 function maskPhoneNumber(value: string) {
   const digits = value.replace(/\D/g, "");
   if (digits.length < 4) return value;
@@ -477,8 +511,7 @@ partnerRouter.get(
     const isBusy = activeSessions.length > 0;
     const isOnline = Boolean(companion?.isOnline);
     const isPresenceOnline = companion ? isPartnerPresenceFresh(companion) : false;
-    const effectiveOnline = isOnline && isPresenceOnline;
-    const effectiveStatus = !effectiveOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+    const effectiveStatus = resolveEffectiveStatus({ isBusy, presenceFresh: isPresenceOnline });
 
     res.json({
       hasApplication: Boolean(application),
@@ -518,14 +551,14 @@ partnerRouter.get(
             id: companion.id,
             status: companion.status,
             verificationStatus: companion.verificationStatus,
-            isOnline: effectiveOnline,
+            isOnline: isPresenceOnline,
             rawIsOnline: companion.isOnline,
             isBusy,
             effectiveStatus,
           }
         : null,
       availability: {
-        isOnline: effectiveOnline,
+        isOnline: isPresenceOnline,
         rawIsOnline: isOnline,
         presenceFresh: isPresenceOnline,
         isBusy,
@@ -761,12 +794,15 @@ partnerRouter.post(
       where: { id: companion.id },
       data: { isOnline: true },
     });
+    const isBusy = await hasActiveCompanionSession(updated.id);
+    const presenceFresh = isPartnerPresenceFresh(updated);
 
     res.json({
-      isOnline: true,
+      isOnline: presenceFresh,
       rawIsOnline: updated.isOnline,
-      presenceFresh: true,
-      effectiveStatus: "ONLINE",
+      presenceFresh,
+      isBusy,
+      effectiveStatus: resolveEffectiveStatus({ isBusy, presenceFresh }),
       updatedAt: updated.updatedAt,
     });
   }),
@@ -789,13 +825,15 @@ partnerRouter.post(
       where: { id: companion.id },
       data: { isOnline: companion.isOnline },
     });
-    const effectiveOnline = isPartnerPresenceFresh(updated);
+    const isBusy = await hasActiveCompanionSession(updated.id);
+    const presenceFresh = isPartnerPresenceFresh(updated);
 
     res.json({
-      isOnline: effectiveOnline,
+      isOnline: presenceFresh,
       rawIsOnline: updated.isOnline,
-      presenceFresh: effectiveOnline,
-      effectiveStatus: effectiveOnline ? "ONLINE" : "OFFLINE",
+      presenceFresh,
+      isBusy,
+      effectiveStatus: resolveEffectiveStatus({ isBusy, presenceFresh }),
       updatedAt: updated.updatedAt,
     });
   }),
@@ -818,12 +856,14 @@ partnerRouter.post(
       where: { id: companion.id },
       data: { isOnline: false },
     });
+    const isBusy = await hasActiveCompanionSession(updated.id);
 
     res.json({
       isOnline: false,
       rawIsOnline: updated.isOnline,
       presenceFresh: false,
-      effectiveStatus: "OFFLINE",
+      isBusy,
+      effectiveStatus: resolveEffectiveStatus({ isBusy, presenceFresh: false }),
       updatedAt: updated.updatedAt,
     });
   }),
