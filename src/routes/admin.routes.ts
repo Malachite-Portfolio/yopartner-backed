@@ -710,6 +710,13 @@ adminRouter.get(
         aadhaarFrontUploaded: true,
         aadhaarBackUploaded: true,
         panUploaded: true,
+        liveVerificationName: true,
+        liveVerificationAge: true,
+        liveVerificationHobbies: true,
+        liveVideoUploaded: true,
+        liveVideoFileName: true,
+        liveVideoStoragePath: true,
+        liveVerificationSubmittedAt: true,
         status: true,
         adminNote: true,
         createdAt: true,
@@ -784,6 +791,13 @@ adminRouter.get(
         aadhaarFrontUploaded: true,
         aadhaarBackUploaded: true,
         panUploaded: true,
+        liveVerificationName: true,
+        liveVerificationAge: true,
+        liveVerificationHobbies: true,
+        liveVideoUploaded: true,
+        liveVideoFileName: true,
+        liveVideoStoragePath: true,
+        liveVerificationSubmittedAt: true,
         status: true,
         adminNote: true,
         createdAt: true,
@@ -879,6 +893,60 @@ adminRouter.get(
 
     const [metadata] = await file.getMetadata();
     const contentType = metadata.contentType || "application/octet-stream";
+
+    res.setHeader("Cache-Control", "no-store, private");
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+
+    await new Promise<void>((resolve, reject) => {
+      const stream = file.createReadStream();
+      stream.on("error", reject);
+      stream.on("end", resolve);
+      stream.pipe(res);
+    });
+  }),
+);
+
+adminRouter.get(
+  "/live-verification-videos/:applicationId/preview",
+  asyncHandler(async (req, res) => {
+    if (!firebaseAdminStorage) {
+      throw new HttpError(503, "Live video preview storage is not configured.");
+    }
+
+    const application = await prisma.partnerApplication.findUnique({
+      where: { id: String(req.params.applicationId) },
+      select: {
+        liveVideoUploaded: true,
+        liveVideoFileName: true,
+        liveVideoStoragePath: true,
+      },
+    });
+
+    if (!application) throw new HttpError(404, "Application not found.");
+    if (!application.liveVideoUploaded) throw new HttpError(404, "Live verification video not uploaded.");
+
+    const storageObject = resolveKycStorageObject(application.liveVideoStoragePath, null);
+    if (!storageObject?.objectPath) {
+      throw new HttpError(404, "Live verification video storage path not found.");
+    }
+    if (
+      !storageObject.objectPath.startsWith(KYC_STORAGE_PREFIX) ||
+      !storageObject.objectPath.includes("/live-video/")
+    ) {
+      throw new HttpError(403, "Live verification video path is not allowed.");
+    }
+
+    const bucket = storageObject.bucketName
+      ? firebaseAdminStorage.bucket(storageObject.bucketName)
+      : firebaseAdminStorage.bucket();
+    const file = bucket.file(storageObject.objectPath);
+    const [exists] = await file.exists();
+    if (!exists) throw new HttpError(404, "Live verification video file not found.");
+
+    const [metadata] = await file.getMetadata();
+    const contentType = metadata.contentType || "video/webm";
 
     res.setHeader("Cache-Control", "no-store, private");
     res.setHeader("Content-Type", contentType);

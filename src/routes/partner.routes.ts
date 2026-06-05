@@ -66,6 +66,12 @@ const onboardingSchema = z.object({
   panFileName: z.string().optional(),
   panStoragePath: z.string().optional(),
   panUrl: z.string().optional(),
+  liveVerificationName: z.string().optional(),
+  liveVerificationAge: z.coerce.number().int().min(18).max(70).optional(),
+  liveVerificationHobbies: z.string().optional(),
+  liveVideoUploaded: z.boolean().optional(),
+  liveVideoFileName: z.string().optional(),
+  liveVideoStoragePath: z.string().optional(),
 });
 
 const partnerAvailabilitySchema = z.object({
@@ -91,6 +97,8 @@ const MAX_GALLERY_IMAGES = 6;
 const STALE_LIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.LIVE, SessionStatus.ACCEPTED];
 const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
+const KYC_STORAGE_PREFIX = "YoPartner/partner-kyc/";
+const REQUIRED_KYC_DOCUMENTS_MESSAGE = "Please upload all required verification documents before submitting.";
 
 function isPartnerPresenceFresh(companion: { isOnline: boolean; updatedAt: Date }) {
   if (!companion.isOnline) return false;
@@ -180,6 +188,21 @@ function sanitizeKycDocument(input: {
   };
 }
 
+function isPartnerKycPathForUser(storagePath: string | null, firebaseUid: string | null | undefined) {
+  const normalized = storagePath?.trim() ?? "";
+  const uid = firebaseUid?.trim() ?? "";
+  return Boolean(uid && normalized.startsWith(`${KYC_STORAGE_PREFIX}${uid}/`));
+}
+
+function assertRequiredKycDocument(
+  document: ReturnType<typeof sanitizeKycDocument>,
+  firebaseUid: string | null | undefined,
+) {
+  if (!document.uploaded || !isPartnerKycPathForUser(document.storagePath, firebaseUid)) {
+    throw new HttpError(400, REQUIRED_KYC_DOCUMENTS_MESSAGE);
+  }
+}
+
 export const partnerRouter = Router();
 
 partnerRouter.post(
@@ -235,6 +258,29 @@ partnerRouter.post(
         storagePath: payload.panStoragePath,
         url: payload.panUrl,
       });
+      const liveVideo = sanitizeKycDocument({
+        uploaded: payload.liveVideoUploaded,
+        fileName: payload.liveVideoFileName,
+        storagePath: payload.liveVideoStoragePath,
+      });
+
+      assertRequiredKycDocument(selfie, authUser.firebaseUid);
+      assertRequiredKycDocument(aadhaarFront, authUser.firebaseUid);
+      assertRequiredKycDocument(aadhaarBack, authUser.firebaseUid);
+      assertRequiredKycDocument(pan, authUser.firebaseUid);
+
+      const liveVerificationName = sanitizeOptionalString(payload.liveVerificationName);
+      const liveVerificationHobbies = sanitizeOptionalString(payload.liveVerificationHobbies);
+      if (
+        !liveVerificationName ||
+        !payload.liveVerificationAge ||
+        !liveVerificationHobbies ||
+        !liveVideo.uploaded ||
+        !isPartnerKycPathForUser(liveVideo.storagePath, authUser.firebaseUid) ||
+        !(liveVideo.storagePath ?? "").includes("/live-video/")
+      ) {
+        throw new HttpError(400, "Please complete live video verification before submitting.");
+      }
 
       const application = await prisma.partnerApplication.create({
         data: {
@@ -277,6 +323,13 @@ partnerRouter.post(
           panFileName: pan.fileName,
           panStoragePath: pan.storagePath,
           panUrl: pan.url,
+          liveVerificationName,
+          liveVerificationAge: payload.liveVerificationAge,
+          liveVerificationHobbies,
+          liveVideoUploaded: liveVideo.uploaded,
+          liveVideoFileName: liveVideo.fileName,
+          liveVideoStoragePath: liveVideo.storagePath,
+          liveVerificationSubmittedAt: new Date(),
         },
       });
 
@@ -317,7 +370,8 @@ partnerRouter.post(
             ? 400
             : 500;
       res.status(statusCode).json({
-        error: "Unable to submit partner application.",
+        error: error instanceof HttpError ? error.message : "Unable to submit partner application.",
+        message: error instanceof HttpError ? error.message : "Unable to submit partner application.",
         detail,
       });
     }

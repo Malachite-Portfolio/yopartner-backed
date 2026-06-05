@@ -238,6 +238,13 @@ model PartnerApplication {
   panFileName        String?
   panStoragePath     String?
   panUrl             String?
+  liveVerificationName String?
+  liveVerificationAge Int?
+  liveVerificationHobbies String?
+  liveVideoUploaded Boolean                  @default(false)
+  liveVideoFileName String?
+  liveVideoStoragePath String?
+  liveVerificationSubmittedAt DateTime?
   status             PartnerApplicationStatus @default(UNDER_REVIEW)
   adminNote          String?
   createdAt          DateTime                 @default(now())
