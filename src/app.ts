@@ -16,6 +16,7 @@ import { adminAuthRouter } from "./routes/adminAuth.routes";
 import { agoraRouter } from "./routes/agora.routes";
 import { usersRouter } from "./routes/users.routes";
 import { paymentsRouter } from "./routes/payments.routes";
+import { luckyWheelRouter } from "./routes/luckyWheel.routes";
 import { notFoundHandler } from "./middlewares/notFound";
 import { errorHandler } from "./middlewares/errorHandler";
 
@@ -47,6 +48,7 @@ app.use("/api/sessions", sessionsRouter);
 app.use("/api/reviews", reviewsRouter);
 app.use("/api/wallet", walletRouter);
 app.use("/api/users", usersRouter);
+app.use("/api/lucky-wheel", luckyWheelRouter);
 app.use("/api/admin/auth", adminAuthRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/agora", agoraRouter);

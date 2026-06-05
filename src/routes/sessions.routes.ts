@@ -1,12 +1,15 @@
 import { Router } from "express";
 import {
   CompanionStatus,
+  LuckyWheelRewardType,
   PartnerEarningSourceType,
   PartnerEarningStatus,
+  Prisma,
   ServiceType,
   SessionStatus,
   TransactionStatus,
   TransactionType,
+  UserRewardStatus,
   VerificationStatus,
 } from "@prisma/client";
 import { RtcRole, RtcTokenBuilder } from "agora-token";
@@ -155,6 +158,142 @@ function calculateSessionCharge(session: {
     billableMinutes,
     totalCharge: billableMinutes * ratePerMinute,
   };
+}
+
+type BaseSessionBilling = ReturnType<typeof calculateSessionCharge>;
+
+type RewardApplication = {
+  rewardId: string;
+  type: LuckyWheelRewardType;
+  originalValue: number;
+  usedValue: number;
+  remainingValue: number;
+  discountAmount: number;
+  label: string;
+};
+
+type RewardAdjustedBilling = BaseSessionBilling & {
+  normalCharge: number;
+  rewardApplication: RewardApplication | null;
+};
+
+function getRewardLabel(type: LuckyWheelRewardType, value: number) {
+  if (type === LuckyWheelRewardType.FREE_CHAT_MINUTES) return `${value} free chat minute${value === 1 ? "" : "s"}`;
+  if (type === LuckyWheelRewardType.FREE_CALL_MINUTES) return `${value} free audio minute${value === 1 ? "" : "s"}`;
+  if (type === LuckyWheelRewardType.VIDEO_DISCOUNT_PERCENT) return `${value}% video discount`;
+  return `INR ${value} talktime`;
+}
+
+function matchingRewardType(serviceType: ServiceType) {
+  if (serviceType === ServiceType.CHAT) return LuckyWheelRewardType.FREE_CHAT_MINUTES;
+  if (serviceType === ServiceType.AUDIO) return LuckyWheelRewardType.FREE_CALL_MINUTES;
+  if (serviceType === ServiceType.VIDEO) return LuckyWheelRewardType.VIDEO_DISCOUNT_PERCENT;
+  return null;
+}
+
+async function calculateRewardAdjustedBilling(
+  tx: Pick<Prisma.TransactionClient, "userReward">,
+  userId: string,
+  serviceType: ServiceType,
+  baseBilling: BaseSessionBilling,
+  now: Date,
+): Promise<RewardAdjustedBilling> {
+  const rewardType = matchingRewardType(serviceType);
+  if (!rewardType) {
+    return { ...baseBilling, normalCharge: baseBilling.totalCharge, rewardApplication: null };
+  }
+
+  await tx.userReward.updateMany({
+    where: {
+      userId,
+      status: UserRewardStatus.ACTIVE,
+      expiresAt: { lte: now },
+    },
+    data: { status: UserRewardStatus.EXPIRED },
+  });
+
+  const reward = await tx.userReward.findFirst({
+    where: {
+      userId,
+      type: rewardType,
+      status: UserRewardStatus.ACTIVE,
+      expiresAt: { gt: now },
+      remainingValue: { gt: 0 },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  if (!reward) {
+    return { ...baseBilling, normalCharge: baseBilling.totalCharge, rewardApplication: null };
+  }
+
+  if (reward.type === LuckyWheelRewardType.VIDEO_DISCOUNT_PERCENT) {
+    const discountAmount = Math.min(
+      baseBilling.totalCharge,
+      Math.max(0, Math.round((baseBilling.totalCharge * reward.remainingValue) / 100)),
+    );
+    return {
+      ...baseBilling,
+      normalCharge: baseBilling.totalCharge,
+      totalCharge: Math.max(0, baseBilling.totalCharge - discountAmount),
+      rewardApplication: {
+        rewardId: reward.id,
+        type: reward.type,
+        originalValue: reward.value,
+        usedValue: reward.remainingValue,
+        remainingValue: 0,
+        discountAmount,
+        label: getRewardLabel(reward.type, reward.value),
+      },
+    };
+  }
+
+  const freeMinutes = Math.min(baseBilling.billableMinutes, reward.remainingValue);
+  const discountAmount = freeMinutes * baseBilling.ratePerMinute;
+
+  return {
+    ...baseBilling,
+    normalCharge: baseBilling.totalCharge,
+    totalCharge: Math.max(0, baseBilling.totalCharge - discountAmount),
+    rewardApplication: {
+      rewardId: reward.id,
+      type: reward.type,
+      originalValue: reward.value,
+      usedValue: freeMinutes,
+      remainingValue: Math.max(0, reward.remainingValue - freeMinutes),
+      discountAmount,
+      label: getRewardLabel(reward.type, reward.value),
+    },
+  };
+}
+
+async function redeemSessionReward(
+  tx: Pick<Prisma.TransactionClient, "userReward">,
+  rewardApplication: RewardApplication | null,
+  sessionId: string,
+  now: Date,
+) {
+  if (!rewardApplication) return;
+
+  await tx.userReward.update({
+    where: { id: rewardApplication.rewardId },
+    data: {
+      remainingValue: rewardApplication.remainingValue,
+      status: rewardApplication.remainingValue <= 0 ? UserRewardStatus.REDEEMED : UserRewardStatus.ACTIVE,
+      redeemedAt: rewardApplication.remainingValue <= 0 ? now : undefined,
+      redemptionReferenceId: sessionId,
+    },
+  });
+}
+
+function buildSessionChargeReason(params: {
+  sessionCode: string;
+  serviceType: ServiceType;
+  billing: RewardAdjustedBilling;
+}) {
+  const base = `Session charge for ${params.sessionCode} (${params.serviceType}) - ${params.billing.billableMinutes} min x INR ${params.billing.ratePerMinute}`;
+  if (!params.billing.rewardApplication) return base;
+  return `${base}; Lucky Wheel reward applied: ${params.billing.rewardApplication.label}, discount INR ${params.billing.rewardApplication.discountAmount}`;
 }
 
 function buildGiftMessageBody(gift: {
@@ -1034,12 +1173,14 @@ const endSessionHandler = asyncHandler(async (req, res) => {
   const durationSeconds = session.startedAt
     ? Math.max(1, Math.floor((now.getTime() - session.startedAt.getTime()) / 1000))
     : session.durationSeconds;
-  const billing = calculateSessionCharge(session, durationSeconds);
-  const sessionSplit = splitAmount(billing.totalCharge, 30, 70);
-  const companionEarning = Math.max(0, Math.round(sessionSplit.partnerAmount));
-  const platformFee = billing.totalCharge - companionEarning;
+  const baseBilling = calculateSessionCharge(session, durationSeconds);
 
   const updated = await prisma.$transaction(async (tx) => {
+    const billing = await calculateRewardAdjustedBilling(tx, session.userId, session.serviceType, baseBilling, now);
+    const sessionSplit = splitAmount(billing.totalCharge, 30, 70);
+    const companionEarning = Math.max(0, Math.round(sessionSplit.partnerAmount));
+    const platformFee = billing.totalCharge - companionEarning;
+
     const markEnded = await tx.session.updateMany({
       where: {
         id: session.id,
@@ -1066,7 +1207,7 @@ const endSessionHandler = asyncHandler(async (req, res) => {
 
     let chargeSucceeded = billing.totalCharge <= 0;
 
-    if (billing.totalCharge > 0) {
+    if (billing.totalCharge > 0 || billing.rewardApplication) {
       const wallet = await tx.walletAccount.upsert({
         where: { userId: session.userId },
         update: {},
@@ -1084,42 +1225,57 @@ const endSessionHandler = asyncHandler(async (req, res) => {
       });
 
       if (!existingCharge) {
-        const debited = await tx.walletAccount.updateMany({
-          where: {
-            id: wallet.id,
-            balance: { gte: billing.totalCharge },
-          },
-          data: {
-            balance: { decrement: billing.totalCharge },
-          },
-        });
-
-        if (debited.count > 0) {
+        if (billing.totalCharge <= 0) {
           await tx.walletTransaction.create({
             data: {
               transactionCode: createCode("TXN"),
               walletAccountId: wallet.id,
               type: TransactionType.BOOKING,
-              amount: -billing.totalCharge,
+              amount: 0,
               status: TransactionStatus.SUCCESS,
               referenceId: session.id,
-              reason: `Session charge for ${session.sessionCode} (${session.serviceType}) - ${billing.billableMinutes} min x INR ${billing.ratePerMinute}`,
+              reason: buildSessionChargeReason({ sessionCode: session.sessionCode, serviceType: session.serviceType, billing }),
             },
           });
           chargeSucceeded = true;
         } else {
-          await tx.walletTransaction.create({
+          const debited = await tx.walletAccount.updateMany({
+            where: {
+              id: wallet.id,
+              balance: { gte: billing.totalCharge },
+            },
             data: {
-              transactionCode: createCode("TXN"),
-              walletAccountId: wallet.id,
-              type: TransactionType.BOOKING,
-              amount: -billing.totalCharge,
-              status: TransactionStatus.FAILED,
-              referenceId: session.id,
-              reason: `Session charge failed (insufficient balance) for ${session.sessionCode} (${session.serviceType}) - ${billing.billableMinutes} min x INR ${billing.ratePerMinute}`,
+              balance: { decrement: billing.totalCharge },
             },
           });
-          chargeSucceeded = false;
+
+          if (debited.count > 0) {
+            await tx.walletTransaction.create({
+              data: {
+                transactionCode: createCode("TXN"),
+                walletAccountId: wallet.id,
+                type: TransactionType.BOOKING,
+                amount: -billing.totalCharge,
+                status: TransactionStatus.SUCCESS,
+                referenceId: session.id,
+                reason: buildSessionChargeReason({ sessionCode: session.sessionCode, serviceType: session.serviceType, billing }),
+              },
+            });
+            chargeSucceeded = true;
+          } else {
+            await tx.walletTransaction.create({
+              data: {
+                transactionCode: createCode("TXN"),
+                walletAccountId: wallet.id,
+                type: TransactionType.BOOKING,
+                amount: -billing.totalCharge,
+                status: TransactionStatus.FAILED,
+                referenceId: session.id,
+                reason: `Session charge failed (insufficient balance) for ${session.sessionCode} (${session.serviceType}) - ${billing.billableMinutes} min x INR ${billing.ratePerMinute}`,
+              },
+            });
+            chargeSucceeded = false;
+          }
         }
       } else {
         chargeSucceeded = true;
@@ -1127,6 +1283,8 @@ const endSessionHandler = asyncHandler(async (req, res) => {
     }
 
     if (chargeSucceeded) {
+      await redeemSessionReward(tx, billing.rewardApplication, session.id, now);
+
       await tx.partnerEarning.upsert({
         where: {
           sourceType_sessionId: {

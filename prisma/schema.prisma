@@ -59,12 +59,30 @@ enum TransactionType {
   GIFT
   REFUND
   ADMIN_CREDIT
+  LUCKY_WHEEL_REWARD
 }
 
 enum TransactionStatus {
   PENDING
   SUCCESS
   FAILED
+}
+
+enum LuckyWheelRewardType {
+  FREE_CALL_MINUTES
+  TALK_TIME_CREDIT
+  FREE_CHAT_MINUTES
+  VIDEO_DISCOUNT_PERCENT
+}
+
+enum UserRewardStatus {
+  ACTIVE
+  REDEEMED
+  EXPIRED
+}
+
+enum UserRewardSource {
+  LUCKY_WHEEL
 }
 
 enum PayoutStatus {
@@ -151,6 +169,8 @@ model User {
   reviews        Review[]          @relation("UserReviews")
   supportTickets SupportTicket[]
   partnerEarnings PartnerEarning[]
+  luckyWheelSpins LuckyWheelSpin[]
+  rewards        UserReward[]
 }
 
 model Companion {
@@ -352,7 +372,48 @@ model WalletTransaction {
   referenceId      String?
   reason           String?
   partnerEarnings  PartnerEarning[]
+  rewardRedemption UserReward?
   createdAt        DateTime          @default(now())
+}
+
+model LuckyWheelSpin {
+  id          String               @id @default(cuid())
+  userId      String
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rewardType  LuckyWheelRewardType
+  rewardValue Int
+  rewardLabel String
+  rewardIndex Int
+  createdAt   DateTime             @default(now())
+  expiresAt   DateTime?
+  userReward  UserReward?
+
+  @@index([userId, createdAt])
+  @@index([rewardType, createdAt])
+}
+
+model UserReward {
+  id                    String               @id @default(cuid())
+  userId                String
+  user                  User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type                  LuckyWheelRewardType
+  value                 Int
+  remainingValue        Int
+  status                UserRewardStatus     @default(ACTIVE)
+  source                UserRewardSource     @default(LUCKY_WHEEL)
+  sourceSpinId          String?              @unique
+  sourceSpin            LuckyWheelSpin?      @relation(fields: [sourceSpinId], references: [id], onDelete: SetNull)
+  createdAt             DateTime             @default(now())
+  expiresAt             DateTime
+  redeemedAt            DateTime?
+  redemptionReferenceId String?
+  walletTransactionId   String?              @unique
+  walletTransaction     WalletTransaction?   @relation(fields: [walletTransactionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status, expiresAt])
+  @@index([type, status, expiresAt])
+  @@index([source, createdAt])
+  @@index([redemptionReferenceId])
 }
 
 model PartnerEarning {
