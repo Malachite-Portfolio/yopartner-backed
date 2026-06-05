@@ -3,6 +3,7 @@ import {
   CompanionStatus,
   PartnerEarningSourceType,
   PartnerEarningStatus,
+  PayoutStatus,
   Prisma,
   Role,
   ServiceType,
@@ -15,7 +16,7 @@ import { requireAuth } from "../middlewares/auth";
 import { requireRole } from "../middlewares/roles";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
-import { HttpError } from "../utils/http";
+import { createCode, HttpError } from "../utils/http";
 import { firebaseAdminAuth, isFirebaseAdminConfigured } from "../config/firebaseAdmin";
 import { env } from "../config/env";
 import { assertPartnerDashboardAccess } from "../utils/moderation";
@@ -93,9 +94,15 @@ const partnerDeleteGalleryImageSchema = z.object({
   storagePath: z.string().min(1).max(500).optional(),
 });
 
+const payoutRequestSchema = z.object({
+  amount: z.coerce.number().int().positive(),
+  note: z.string().trim().max(500).optional(),
+});
+
 const MAX_GALLERY_IMAGES = 6;
 const STALE_LIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.LIVE, SessionStatus.ACCEPTED];
+const PENDING_PAYOUT_STATUSES: PayoutStatus[] = [PayoutStatus.REQUESTED, PayoutStatus.APPROVED];
 const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
 const KYC_STORAGE_PREFIX = "YoPartner/partner-kyc/";
 const REQUIRED_KYC_DOCUMENTS_MESSAGE = "Please upload all required verification documents before submitting.";
@@ -153,6 +160,83 @@ function decimalToNumber(value: Prisma.Decimal | number | null | undefined) {
   if (value == null) return 0;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function roundToTwo(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function payoutAdminNote(value: string | null | undefined) {
+  return value?.trim() || null;
+}
+
+function toPartnerPayoutPayload(payout: {
+  id: string;
+  payoutCode: string;
+  amount: number;
+  status: PayoutStatus;
+  requestedAt: Date;
+  processedAt: Date | null;
+  rejectionReason: string | null;
+}) {
+  return {
+    id: payout.id,
+    payoutCode: payout.payoutCode,
+    amount: payout.amount,
+    status: payout.status,
+    requestedAt: payout.requestedAt.toISOString(),
+    processedAt: payout.processedAt ? payout.processedAt.toISOString() : null,
+    adminNote: payoutAdminNote(payout.rejectionReason),
+  };
+}
+
+async function getPartnerPayoutBalances(
+  tx: Pick<Prisma.TransactionClient, "partnerEarning" | "payout">,
+  companionId: string,
+) {
+  const [availableEarnings, pendingPayouts, paidPayouts] = await Promise.all([
+    tx.partnerEarning.aggregate({
+      where: {
+        companionId,
+        status: PartnerEarningStatus.AVAILABLE,
+      },
+      _sum: { partnerAmount: true },
+    }),
+    tx.payout.aggregate({
+      where: {
+        companionId,
+        status: { in: PENDING_PAYOUT_STATUSES },
+      },
+      _sum: { amount: true },
+    }),
+    tx.payout.aggregate({
+      where: {
+        companionId,
+        status: PayoutStatus.PAID,
+      },
+      _sum: { amount: true },
+    }),
+  ]);
+
+  const earnedAvailableAmount = roundToTwo(decimalToNumber(availableEarnings._sum.partnerAmount));
+  const pendingPayoutAmount = pendingPayouts._sum.amount ?? 0;
+  const totalPaidAmount = paidPayouts._sum.amount ?? 0;
+  const availableToWithdraw = roundToTwo(
+    Math.max(0, earnedAvailableAmount - pendingPayoutAmount - totalPaidAmount),
+  );
+
+  return {
+    availableEarnings: availableToWithdraw,
+    availableToWithdraw,
+    pendingPayoutAmount,
+    totalPaidAmount,
+    earnedAvailableAmount,
+    bankDetails: {
+      required: false,
+      status: "NOT_CONFIGURED",
+      note: "Bank details are not stored in the current payout model. Admin may verify payout details before processing.",
+    },
+  };
 }
 
 const toServiceType = (value: string): ServiceType | null => {
@@ -1252,6 +1336,119 @@ partnerRouter.get(
 );
 
 partnerRouter.get(
+  "/payouts/summary",
+  requireAuth,
+  requireRole([Role.PARTNER]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
+    if (!companion) {
+      res.json({
+        summary: {
+          availableEarnings: 0,
+          availableToWithdraw: 0,
+          pendingPayoutAmount: 0,
+          totalPaidAmount: 0,
+          earnedAvailableAmount: 0,
+          bankDetails: {
+            required: false,
+            status: "NOT_CONFIGURED",
+            note: "Bank details are not stored in the current payout model. Admin may verify payout details before processing.",
+          },
+        },
+      });
+      return;
+    }
+
+    const summary = await getPartnerPayoutBalances(prisma, companion.id);
+    res.json({ summary });
+  }),
+);
+
+partnerRouter.get(
+  "/payouts",
+  requireAuth,
+  requireRole([Role.PARTNER]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
+    if (!companion) {
+      res.json({ payouts: [] });
+      return;
+    }
+
+    const payouts = await prisma.payout.findMany({
+      where: { companionId: companion.id },
+      orderBy: { requestedAt: "desc" },
+    });
+
+    res.json({ payouts: payouts.map(toPartnerPayoutPayload) });
+  }),
+);
+
+partnerRouter.post(
+  "/payouts/request",
+  requireAuth,
+  requireRole([Role.PARTNER]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const payload = payoutRequestSchema.parse(req.body);
+    const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
+    if (!companion) {
+      throw new HttpError(404, "Partner profile not found.");
+    }
+
+    const createRequest = async () =>
+      prisma.$transaction(
+        async (tx) => {
+          const balances = await getPartnerPayoutBalances(tx, companion.id);
+          if (payload.amount <= 0) {
+            throw new HttpError(400, "Payout amount must be greater than zero.");
+          }
+          if (payload.amount > balances.availableToWithdraw) {
+            throw new HttpError(400, "Payout amount exceeds available earnings.");
+          }
+
+          const payout = await tx.payout.create({
+            data: {
+              payoutCode: createCode("PO"),
+              companionId: companion.id,
+              amount: payload.amount,
+              status: PayoutStatus.REQUESTED,
+            },
+          });
+
+          return {
+            payout,
+            summary: await getPartnerPayoutBalances(tx, companion.id),
+          };
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+
+    let result: Awaited<ReturnType<typeof createRequest>>;
+    try {
+      result = await createRequest();
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
+        result = await createRequest();
+      } else {
+        throw error;
+      }
+    }
+
+    res.status(201).json({
+      payout: toPartnerPayoutPayload(result.payout),
+      summary: result.summary,
+      message: "Payout request submitted.",
+    });
+  }),
+);
+
+partnerRouter.get(
   "/earnings",
   requireAuth,
   requireRole([Role.PARTNER, Role.ADMIN]),
@@ -1271,6 +1468,8 @@ partnerRouter.get(
           pendingAmount: 0,
           availableBalance: 0,
           paidAmount: 0,
+          pendingPayoutAmount: 0,
+          totalPaidAmount: 0,
           ...(isAdmin ? { companyTotal: 0 } : {}),
         },
       });
@@ -1299,10 +1498,10 @@ partnerRouter.get(
         orderBy: { createdAt: "desc" },
       }),
     ]);
+    const payoutBalances = await getPartnerPayoutBalances(prisma, companion.id);
 
     const summary = partnerEarnings.reduce(
       (acc, row) => {
-        const gross = decimalToNumber(row.grossAmount);
         const partnerAmount = decimalToNumber(row.partnerAmount);
         const companyAmount = decimalToNumber(row.companyAmount);
         const isSession = row.sourceType === PartnerEarningSourceType.SESSION;
@@ -1340,18 +1539,18 @@ partnerRouter.get(
         sourceType: row.sourceType,
         source: row.sourceType === PartnerEarningSourceType.SESSION ? (row.session?.serviceType ?? "SESSION") : "GIFT",
         user: row.user.name?.trim() || maskPhoneNumber(row.user.phoneNumber),
-        grossAmount: decimalToNumber(row.grossAmount),
         myEarnings: decimalToNumber(row.partnerAmount),
         status: row.status,
         ...(isAdmin
           ? {
+              grossAmount: decimalToNumber(row.grossAmount),
               companyAmount: decimalToNumber(row.companyAmount),
               partnerPercent: decimalToNumber(row.partnerPercent),
               companyPercent: decimalToNumber(row.companyPercent),
             }
           : {}),
       })),
-      payouts,
+      payouts: payouts.map(toPartnerPayoutPayload),
       summary: isAdmin
         ? {
             ...summary,
@@ -1361,9 +1560,11 @@ partnerRouter.get(
             totalEarnings: summary.totalEarnings,
             sessionEarnings: summary.sessionEarnings,
             giftEarnings: summary.giftEarnings,
-            availableBalance: summary.availableBalance,
+            availableBalance: payoutBalances.availableToWithdraw,
             pendingAmount: summary.pendingAmount,
             paidAmount: summary.paidAmount,
+            pendingPayoutAmount: payoutBalances.pendingPayoutAmount,
+            totalPaidAmount: payoutBalances.totalPaidAmount,
           },
     });
   }),
