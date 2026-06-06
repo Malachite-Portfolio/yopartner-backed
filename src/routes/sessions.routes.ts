@@ -374,6 +374,22 @@ async function getReservedSessionRewardMetadata(session: {
   } satisfies SessionRewardMetadata;
 }
 
+async function releaseUnstartedSessionReward(
+  tx: Pick<Prisma.TransactionClient, "userReward">,
+  session: { id: string; startedAt?: Date | null; liveStartedAt?: Date | null },
+) {
+  if (session.startedAt || session.liveStartedAt) return;
+  await tx.userReward.updateMany({
+    where: {
+      status: UserRewardStatus.ACTIVE,
+      redemptionReferenceId: session.id,
+    },
+    data: {
+      redemptionReferenceId: null,
+    },
+  });
+}
+
 function buildSessionChargeReason(params: {
   sessionCode: string;
   serviceType: ServiceType;
@@ -1293,13 +1309,17 @@ sessionsRouter.post(
       return;
     }
 
-    const updated = await prisma.session.update({
-      where: { id: session.id },
-      data: {
-        status: SessionStatus.CANCELLED,
-        endedAt: session.endedAt ?? new Date(),
-        endedByUserId: authUser.id,
-      },
+    const updated = await prisma.$transaction(async (tx) => {
+      const updated = await tx.session.update({
+        where: { id: session.id },
+        data: {
+          status: SessionStatus.CANCELLED,
+          endedAt: session.endedAt ?? new Date(),
+          endedByUserId: authUser.id,
+        },
+      });
+      await releaseUnstartedSessionReward(tx, session);
+      return updated;
     });
 
     res.json({

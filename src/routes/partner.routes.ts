@@ -8,6 +8,7 @@ import {
   Role,
   ServiceType,
   SessionStatus,
+  UserRewardStatus,
   VerificationStatus,
 } from "@prisma/client";
 import type { DecodedIdToken } from "firebase-admin/auth";
@@ -848,13 +849,25 @@ partnerRouter.post(
       return;
     }
 
-    const updated = await prisma.session.update({
-      where: { id: existing.id },
-      data: {
-        status: SessionStatus.DECLINED,
-        endedAt: existing.endedAt ?? new Date(),
-        endedByUserId: authUser.id,
-      },
+    const updated = await prisma.$transaction(async (tx) => {
+      const updated = await tx.session.update({
+        where: { id: existing.id },
+        data: {
+          status: SessionStatus.DECLINED,
+          endedAt: existing.endedAt ?? new Date(),
+          endedByUserId: authUser.id,
+        },
+      });
+      await tx.userReward.updateMany({
+        where: {
+          status: UserRewardStatus.ACTIVE,
+          redemptionReferenceId: existing.id,
+        },
+        data: {
+          redemptionReferenceId: null,
+        },
+      });
+      return updated;
     });
 
     res.json({
