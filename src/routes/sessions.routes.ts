@@ -173,6 +173,23 @@ function calculateSessionCharge(session: {
 
 type BaseSessionBilling = ReturnType<typeof calculateSessionCharge>;
 
+function calculateSessionChargeForBillableMinutes(serviceType: ServiceType, billableMinutes: number): BaseSessionBilling {
+  const ratePerMinute = getFixedSessionRate(serviceType);
+  return {
+    ratePerMinute,
+    billableMinutes,
+    totalCharge: billableMinutes * ratePerMinute,
+  };
+}
+
+function zeroSessionBilling(serviceType: ServiceType): RewardAdjustedBilling {
+  return {
+    ...calculateSessionChargeForBillableMinutes(serviceType, 0),
+    normalCharge: 0,
+    rewardApplication: null,
+  };
+}
+
 type RewardApplication = {
   rewardId: string;
   type: LuckyWheelRewardType;
@@ -193,6 +210,12 @@ type SessionRewardMetadata = {
   appliedRewardType: LuckyWheelRewardType;
   freeSeconds: number | null;
   shouldAutoEndAtFreeLimit: boolean;
+};
+
+type SessionBillingLimitMetadata = {
+  maxAllowedSeconds: number | null;
+  warningAtSeconds: number | null;
+  autoEndAt: string | null;
 };
 
 function getRewardLabel(type: LuckyWheelRewardType, value: number) {
@@ -294,6 +317,42 @@ async function calculateRewardAdjustedBilling(
   };
 }
 
+async function calculateAffordableSessionBilling(params: {
+  tx: Pick<Prisma.TransactionClient, "userReward">;
+  userId: string;
+  serviceType: ServiceType;
+  requestedDurationSeconds: number;
+  walletBalance: number;
+  now: Date;
+  reservationReferenceId: string;
+}) {
+  const requestedBillableMinutes = Math.max(1, Math.ceil(Math.max(1, params.requestedDurationSeconds) / 60));
+
+  for (let minutes = requestedBillableMinutes; minutes >= 1; minutes -= 1) {
+    const candidate = await calculateRewardAdjustedBilling(
+      params.tx,
+      params.userId,
+      params.serviceType,
+      calculateSessionChargeForBillableMinutes(params.serviceType, minutes),
+      params.now,
+      { reservationReferenceId: params.reservationReferenceId },
+    );
+    if (candidate.totalCharge <= params.walletBalance) {
+      return {
+        billing: candidate,
+        chargeableDurationSeconds: Math.min(params.requestedDurationSeconds, minutes * 60),
+        maxAllowedSeconds: minutes * 60,
+      };
+    }
+  }
+
+  return {
+    billing: zeroSessionBilling(params.serviceType),
+    chargeableDurationSeconds: 0,
+    maxAllowedSeconds: 0,
+  };
+}
+
 async function redeemSessionReward(
   tx: Pick<Prisma.TransactionClient, "userReward">,
   rewardApplication: RewardApplication | null,
@@ -317,6 +376,57 @@ function createSessionId() {
   return `ses_${randomUUID().replace(/-/g, "")}`;
 }
 
+function getRewardFreeSeconds(reward: Pick<RewardApplication, "type" | "originalValue"> | null) {
+  if (!reward) return 0;
+  if (reward.type !== LuckyWheelRewardType.FREE_CALL_MINUTES && reward.type !== LuckyWheelRewardType.FREE_CHAT_MINUTES) {
+    return 0;
+  }
+  return Math.max(0, reward.originalValue * 60);
+}
+
+function getEffectivePrepaidRatePerMinute(serviceType: ServiceType, reward: Pick<RewardApplication, "type" | "usedValue"> | null) {
+  const rate = getFixedSessionRate(serviceType);
+  if (reward?.type !== LuckyWheelRewardType.VIDEO_DISCOUNT_PERCENT) return rate;
+  const discount = Math.min(rate, Math.max(0, Math.round((rate * reward.usedValue) / 100)));
+  return Math.max(1, rate - discount);
+}
+
+function buildSessionBillingLimit(params: {
+  serviceType: ServiceType;
+  walletBalance: number;
+  rewardApplication: RewardApplication | null;
+  timerBase?: Date | null;
+}): SessionBillingLimitMetadata {
+  const freeSeconds = getRewardFreeSeconds(params.rewardApplication);
+  const effectiveRatePerMinute = getEffectivePrepaidRatePerMinute(params.serviceType, params.rewardApplication);
+  const paidSeconds = Math.max(0, Math.floor(params.walletBalance / effectiveRatePerMinute) * 60);
+  const maxAllowedSeconds = freeSeconds + paidSeconds;
+  const warningAtSeconds = maxAllowedSeconds > 30 ? maxAllowedSeconds - 30 : null;
+  const autoEndAt = params.timerBase ? new Date(params.timerBase.getTime() + maxAllowedSeconds * 1000).toISOString() : null;
+  return {
+    maxAllowedSeconds,
+    warningAtSeconds,
+    autoEndAt,
+  };
+}
+
+function toRewardApplication(reward: {
+  id: string;
+  type: LuckyWheelRewardType;
+  value: number;
+  remainingValue: number;
+}): RewardApplication {
+  return {
+    rewardId: reward.id,
+    type: reward.type,
+    originalValue: reward.value,
+    usedValue: reward.remainingValue,
+    remainingValue: 0,
+    discountAmount: 0,
+    label: getRewardLabel(reward.type, reward.value),
+  };
+}
+
 function toSessionRewardMetadata(params: {
   rewardApplication: RewardApplication | null;
   serviceType: ServiceType;
@@ -336,42 +446,49 @@ function toSessionRewardMetadata(params: {
   } satisfies SessionRewardMetadata;
 }
 
-async function getReservedSessionRewardMetadata(session: {
+async function getSessionRewardAndBillingMetadata(session: {
   id: string;
   userId: string;
   serviceType: ServiceType;
+  startedAt?: Date | null;
+  liveStartedAt?: Date | null;
 }) {
   const rewardType = matchingRewardType(session.serviceType);
-  if (!rewardType) return null;
 
   const now = new Date();
-  const reward = await prisma.userReward.findFirst({
-    where: {
-      userId: session.userId,
-      type: rewardType,
-      status: UserRewardStatus.ACTIVE,
-      expiresAt: { gt: now },
-      remainingValue: { gt: 0 },
-      redemptionReferenceId: session.id,
-    },
-    orderBy: { createdAt: "asc" },
-  });
-  if (!reward) return null;
-
-  const wallet = await prisma.walletAccount.findUnique({
-    where: { userId: session.userId },
-    select: { balance: true },
-  });
-  const freeSeconds =
-    reward.type === LuckyWheelRewardType.FREE_CALL_MINUTES || reward.type === LuckyWheelRewardType.FREE_CHAT_MINUTES
-      ? reward.remainingValue * 60
-      : null;
+  const [reward, wallet] = await Promise.all([
+    rewardType
+      ? prisma.userReward.findFirst({
+          where: {
+            userId: session.userId,
+            type: rewardType,
+            status: UserRewardStatus.ACTIVE,
+            expiresAt: { gt: now },
+            remainingValue: { gt: 0 },
+            redemptionReferenceId: session.id,
+          },
+          orderBy: { createdAt: "asc" },
+        })
+      : Promise.resolve(null),
+    prisma.walletAccount.findUnique({
+      where: { userId: session.userId },
+      select: { balance: true },
+    }),
+  ]);
+  const rewardApplication = reward ? toRewardApplication(reward) : null;
   return {
-    appliedRewardId: reward.id,
-    appliedRewardType: reward.type,
-    freeSeconds,
-    shouldAutoEndAtFreeLimit: Boolean(freeSeconds && (wallet?.balance ?? 0) < getFixedSessionRate(session.serviceType)),
-  } satisfies SessionRewardMetadata;
+    rewardMetadata: toSessionRewardMetadata({
+      rewardApplication,
+      serviceType: session.serviceType,
+      walletBalance: wallet?.balance ?? 0,
+    }),
+    billingLimit: buildSessionBillingLimit({
+      serviceType: session.serviceType,
+      walletBalance: wallet?.balance ?? 0,
+      rewardApplication,
+      timerBase: session.liveStartedAt ?? session.startedAt ?? null,
+    }),
+  };
 }
 
 async function releaseUnstartedSessionReward(
@@ -566,7 +683,7 @@ function toSessionResponse(session: {
   user?: unknown;
   companion?: unknown;
   booking?: unknown;
-}, authUserId: string, rewardMetadata: SessionRewardMetadata | null = null) {
+}, authUserId: string, rewardMetadata: SessionRewardMetadata | null = null, billingLimit: SessionBillingLimitMetadata | null = null) {
   return {
     id: session.id,
     sessionCode: session.sessionCode,
@@ -610,6 +727,7 @@ function toSessionResponse(session: {
         }
       : null,
     reward: rewardMetadata,
+    billingLimit,
     agoraToken: null,
     agoraUid: buildAgoraUid(session.id, authUserId),
   };
@@ -655,10 +773,10 @@ sessionsRouter.get(
     const authUser = req.authUser!;
     const session = await findSessionForActor(String(req.params.id), authUser.id);
     if (!session) throw new HttpError(404, "Session not found.");
-    const rewardMetadata = await getReservedSessionRewardMetadata(session);
+    const metadata = await getSessionRewardAndBillingMetadata(session);
 
     res.json({
-      session: toSessionResponse(session, authUser.id, rewardMetadata),
+      session: toSessionResponse(session, authUser.id, metadata.rewardMetadata, metadata.billingLimit),
     });
   }),
 );
@@ -1194,6 +1312,12 @@ sessionsRouter.post(
           serviceType,
           walletBalance: wallet.balance,
         }),
+        billingLimit: buildSessionBillingLimit({
+          serviceType,
+          walletBalance: wallet.balance,
+          rewardApplication: rewardAdjustedMinimum.rewardApplication,
+          timerBase: null,
+        }),
       };
     });
 
@@ -1220,7 +1344,7 @@ sessionsRouter.post(
       });
     });
     res.status(201).json({
-      session: toSessionResponse(session, authUser.id, creationResult.rewardMetadata),
+      session: toSessionResponse(session, authUser.id, creationResult.rewardMetadata, creationResult.billingLimit),
     });
   }),
 );
@@ -1292,7 +1416,8 @@ sessionsRouter.post(
       });
     });
 
-    res.json({ session: toSessionResponse(updated, authUser.id) });
+    const metadata = await getSessionRewardAndBillingMetadata(updated);
+    res.json({ session: toSessionResponse(updated, authUser.id, metadata.rewardMetadata, metadata.billingLimit) });
   }),
 );
 
@@ -1342,12 +1467,24 @@ const endSessionHandler = asyncHandler(async (req, res) => {
   const durationSeconds = session.startedAt
     ? Math.max(1, Math.floor((now.getTime() - session.startedAt.getTime()) / 1000))
     : session.durationSeconds;
-  const baseBilling = calculateSessionCharge(session, durationSeconds);
 
   const updated = await prisma.$transaction(async (tx) => {
-    const billing = await calculateRewardAdjustedBilling(tx, session.userId, session.serviceType, baseBilling, now, {
+    const wallet = await tx.walletAccount.upsert({
+      where: { userId: session.userId },
+      update: {},
+      create: { userId: session.userId },
+    });
+    const affordableBilling = await calculateAffordableSessionBilling({
+      tx,
+      userId: session.userId,
+      serviceType: session.serviceType,
+      requestedDurationSeconds: durationSeconds,
+      walletBalance: wallet.balance,
+      now,
       reservationReferenceId: session.id,
     });
+    const billing = affordableBilling.billing;
+    const chargeableDurationSeconds = affordableBilling.chargeableDurationSeconds;
     const sessionSplit = splitAmount(billing.totalCharge, 30, 70);
     const companionEarning = Math.max(0, Math.round(sessionSplit.partnerAmount));
     const platformFee = billing.totalCharge - companionEarning;
@@ -1361,7 +1498,7 @@ const endSessionHandler = asyncHandler(async (req, res) => {
         status: SessionStatus.ENDED,
         endedAt: now,
         endedByUserId: authUser.id,
-        durationSeconds,
+        durationSeconds: chargeableDurationSeconds,
         amount: billing.totalCharge,
         companionEarning,
         platformFee,
@@ -1379,12 +1516,6 @@ const endSessionHandler = asyncHandler(async (req, res) => {
     let chargeSucceeded = billing.totalCharge <= 0;
 
     if (billing.totalCharge > 0 || billing.rewardApplication) {
-      const wallet = await tx.walletAccount.upsert({
-        where: { userId: session.userId },
-        update: {},
-        create: { userId: session.userId },
-      });
-
       const existingCharge = await tx.walletTransaction.findFirst({
         where: {
           walletAccountId: wallet.id,
