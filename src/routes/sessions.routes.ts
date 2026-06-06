@@ -143,6 +143,15 @@ function getMinimumWalletBalanceForSession(serviceType: ServiceType) {
   return getFixedSessionRate(serviceType);
 }
 
+function getMinimumBillingForSessionStart(serviceType: ServiceType): BaseSessionBilling {
+  const ratePerMinute = getMinimumWalletBalanceForSession(serviceType);
+  return {
+    ratePerMinute,
+    billableMinutes: 1,
+    totalCharge: ratePerMinute,
+  };
+}
+
 function calculateSessionCharge(session: {
   amount: number;
   serviceType: ServiceType;
@@ -978,20 +987,32 @@ sessionsRouter.post(
       return;
     }
 
-    const minimumWalletBalance = getMinimumWalletBalanceForSession(serviceType);
-    const wallet = await prisma.walletAccount.upsert({
-      where: { userId: authUser.id },
-      update: {},
-      create: { userId: authUser.id },
+    const minimumWalletCheck = await prisma.$transaction(async (tx) => {
+      const wallet = await tx.walletAccount.upsert({
+        where: { userId: authUser.id },
+        update: {},
+        create: { userId: authUser.id },
+      });
+      const rewardAdjustedMinimum = await calculateRewardAdjustedBilling(
+        tx,
+        authUser.id,
+        serviceType,
+        getMinimumBillingForSessionStart(serviceType),
+        new Date(),
+      );
+      return {
+        walletBalance: wallet.balance,
+        requiredBalance: rewardAdjustedMinimum.totalCharge,
+      };
     });
 
-    if (wallet.balance < minimumWalletBalance) {
+    if (minimumWalletCheck.walletBalance < minimumWalletCheck.requiredBalance) {
       res.status(402).json({
         error: INSUFFICIENT_WALLET_BALANCE_CODE,
         code: INSUFFICIENT_WALLET_BALANCE_CODE,
         message: "Please add money to continue.",
-        requiredBalance: minimumWalletBalance,
-        walletBalance: wallet.balance,
+        requiredBalance: minimumWalletCheck.requiredBalance,
+        walletBalance: minimumWalletCheck.walletBalance,
       });
       return;
     }
