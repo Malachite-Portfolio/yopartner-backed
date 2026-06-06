@@ -12,6 +12,7 @@ import {
   UserRewardStatus,
   VerificationStatus,
 } from "@prisma/client";
+import { randomUUID } from "node:crypto";
 import { RtcRole, RtcTokenBuilder } from "agora-token";
 import { z } from "zod";
 import { requireAuth } from "../middlewares/auth";
@@ -187,6 +188,13 @@ type RewardAdjustedBilling = BaseSessionBilling & {
   rewardApplication: RewardApplication | null;
 };
 
+type SessionRewardMetadata = {
+  appliedRewardId: string;
+  appliedRewardType: LuckyWheelRewardType;
+  freeSeconds: number | null;
+  shouldAutoEndAtFreeLimit: boolean;
+};
+
 function getRewardLabel(type: LuckyWheelRewardType, value: number) {
   if (type === LuckyWheelRewardType.FREE_CHAT_MINUTES) return `${value} free chat minute${value === 1 ? "" : "s"}`;
   if (type === LuckyWheelRewardType.FREE_CALL_MINUTES) return `${value} free audio minute${value === 1 ? "" : "s"}`;
@@ -207,6 +215,7 @@ async function calculateRewardAdjustedBilling(
   serviceType: ServiceType,
   baseBilling: BaseSessionBilling,
   now: Date,
+  options?: { reservationReferenceId?: string | null; allowUnreserved?: boolean },
 ): Promise<RewardAdjustedBilling> {
   const rewardType = matchingRewardType(serviceType);
   if (!rewardType) {
@@ -222,6 +231,13 @@ async function calculateRewardAdjustedBilling(
     data: { status: UserRewardStatus.EXPIRED },
   });
 
+  const reservationFilters: Prisma.UserRewardWhereInput[] = options?.reservationReferenceId
+    ? [
+        { redemptionReferenceId: options.reservationReferenceId },
+        ...(options.allowUnreserved === false ? [] : [{ redemptionReferenceId: null }]),
+      ]
+    : [{ redemptionReferenceId: null }];
+
   const reward = await tx.userReward.findFirst({
     where: {
       userId,
@@ -229,6 +245,7 @@ async function calculateRewardAdjustedBilling(
       status: UserRewardStatus.ACTIVE,
       expiresAt: { gt: now },
       remainingValue: { gt: 0 },
+      OR: reservationFilters,
     },
     orderBy: { createdAt: "asc" },
   });
@@ -288,12 +305,73 @@ async function redeemSessionReward(
   await tx.userReward.update({
     where: { id: rewardApplication.rewardId },
     data: {
-      remainingValue: rewardApplication.remainingValue,
-      status: rewardApplication.remainingValue <= 0 ? UserRewardStatus.REDEEMED : UserRewardStatus.ACTIVE,
-      redeemedAt: rewardApplication.remainingValue <= 0 ? now : undefined,
+      remainingValue: 0,
+      status: UserRewardStatus.REDEEMED,
+      redeemedAt: now,
       redemptionReferenceId: sessionId,
     },
   });
+}
+
+function createSessionId() {
+  return `ses_${randomUUID().replace(/-/g, "")}`;
+}
+
+function toSessionRewardMetadata(params: {
+  rewardApplication: RewardApplication | null;
+  serviceType: ServiceType;
+  walletBalance: number;
+}) {
+  const reward = params.rewardApplication;
+  if (!reward) return null;
+  const freeSeconds =
+    reward.type === LuckyWheelRewardType.FREE_CALL_MINUTES || reward.type === LuckyWheelRewardType.FREE_CHAT_MINUTES
+      ? reward.originalValue * 60
+      : null;
+  return {
+    appliedRewardId: reward.rewardId,
+    appliedRewardType: reward.type,
+    freeSeconds,
+    shouldAutoEndAtFreeLimit: Boolean(freeSeconds && params.walletBalance < getFixedSessionRate(params.serviceType)),
+  } satisfies SessionRewardMetadata;
+}
+
+async function getReservedSessionRewardMetadata(session: {
+  id: string;
+  userId: string;
+  serviceType: ServiceType;
+}) {
+  const rewardType = matchingRewardType(session.serviceType);
+  if (!rewardType) return null;
+
+  const now = new Date();
+  const reward = await prisma.userReward.findFirst({
+    where: {
+      userId: session.userId,
+      type: rewardType,
+      status: UserRewardStatus.ACTIVE,
+      expiresAt: { gt: now },
+      remainingValue: { gt: 0 },
+      redemptionReferenceId: session.id,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  if (!reward) return null;
+
+  const wallet = await prisma.walletAccount.findUnique({
+    where: { userId: session.userId },
+    select: { balance: true },
+  });
+  const freeSeconds =
+    reward.type === LuckyWheelRewardType.FREE_CALL_MINUTES || reward.type === LuckyWheelRewardType.FREE_CHAT_MINUTES
+      ? reward.remainingValue * 60
+      : null;
+  return {
+    appliedRewardId: reward.id,
+    appliedRewardType: reward.type,
+    freeSeconds,
+    shouldAutoEndAtFreeLimit: Boolean(freeSeconds && (wallet?.balance ?? 0) < getFixedSessionRate(session.serviceType)),
+  } satisfies SessionRewardMetadata;
 }
 
 function buildSessionChargeReason(params: {
@@ -472,7 +550,7 @@ function toSessionResponse(session: {
   user?: unknown;
   companion?: unknown;
   booking?: unknown;
-}, authUserId: string) {
+}, authUserId: string, rewardMetadata: SessionRewardMetadata | null = null) {
   return {
     id: session.id,
     sessionCode: session.sessionCode,
@@ -515,6 +593,7 @@ function toSessionResponse(session: {
             "Partner",
         }
       : null,
+    reward: rewardMetadata,
     agoraToken: null,
     agoraUid: buildAgoraUid(session.id, authUserId),
   };
@@ -560,9 +639,10 @@ sessionsRouter.get(
     const authUser = req.authUser!;
     const session = await findSessionForActor(String(req.params.id), authUser.id);
     if (!session) throw new HttpError(404, "Session not found.");
+    const rewardMetadata = await getReservedSessionRewardMetadata(session);
 
     res.json({
-      session: toSessionResponse(session, authUser.id),
+      session: toSessionResponse(session, authUser.id, rewardMetadata),
     });
   }),
 );
@@ -987,36 +1067,6 @@ sessionsRouter.post(
       return;
     }
 
-    const minimumWalletCheck = await prisma.$transaction(async (tx) => {
-      const wallet = await tx.walletAccount.upsert({
-        where: { userId: authUser.id },
-        update: {},
-        create: { userId: authUser.id },
-      });
-      const rewardAdjustedMinimum = await calculateRewardAdjustedBilling(
-        tx,
-        authUser.id,
-        serviceType,
-        getMinimumBillingForSessionStart(serviceType),
-        new Date(),
-      );
-      return {
-        walletBalance: wallet.balance,
-        requiredBalance: rewardAdjustedMinimum.totalCharge,
-      };
-    });
-
-    if (minimumWalletCheck.walletBalance < minimumWalletCheck.requiredBalance) {
-      res.status(402).json({
-        error: INSUFFICIENT_WALLET_BALANCE_CODE,
-        code: INSUFFICIENT_WALLET_BALANCE_CODE,
-        message: "Please add money to continue.",
-        requiredBalance: minimumWalletCheck.requiredBalance,
-        walletBalance: minimumWalletCheck.walletBalance,
-      });
-      return;
-    }
-
     const existingPending = await prisma.session.findFirst({
       where: {
         userId: authUser.id,
@@ -1060,22 +1110,88 @@ sessionsRouter.post(
       throw new HttpError(409, "Partner is currently busy.");
     }
 
-    const session = await prisma.session.create({
-      data: {
-        sessionCode: createCode("SES"),
-        bookingId: body.bookingId,
-        userId: authUser.id,
-        companionId: body.companionId,
+    const sessionId = createSessionId();
+    const creationResult = await prisma.$transaction(async (tx) => {
+      const wallet = await tx.walletAccount.upsert({
+        where: { userId: authUser.id },
+        update: {},
+        create: { userId: authUser.id },
+      });
+      const rewardAdjustedMinimum = await calculateRewardAdjustedBilling(
+        tx,
+        authUser.id,
         serviceType,
-        status: SessionStatus.PENDING,
-        acceptedAt: null,
-        startedAt: null,
-        endedAt: null,
-        endedByUserId: null,
-        lastHeartbeatAt: new Date(),
-        amount: getFixedSessionRate(serviceType),
-      },
+        getMinimumBillingForSessionStart(serviceType),
+        new Date(),
+      );
+
+      if (wallet.balance < rewardAdjustedMinimum.totalCharge) {
+        return {
+          insufficient: true as const,
+          requiredBalance: rewardAdjustedMinimum.totalCharge,
+          walletBalance: wallet.balance,
+        };
+      }
+
+      const session = await tx.session.create({
+        data: {
+          id: sessionId,
+          sessionCode: createCode("SES"),
+          bookingId: body.bookingId,
+          userId: authUser.id,
+          companionId: body.companionId,
+          serviceType,
+          status: SessionStatus.PENDING,
+          acceptedAt: null,
+          startedAt: null,
+          endedAt: null,
+          endedByUserId: null,
+          lastHeartbeatAt: new Date(),
+          amount: getFixedSessionRate(serviceType),
+        },
+      });
+
+      if (rewardAdjustedMinimum.rewardApplication) {
+        const reserved = await tx.userReward.updateMany({
+          where: {
+            id: rewardAdjustedMinimum.rewardApplication.rewardId,
+            userId: authUser.id,
+            status: UserRewardStatus.ACTIVE,
+            redemptionReferenceId: null,
+            remainingValue: { gt: 0 },
+            expiresAt: { gt: new Date() },
+          },
+          data: {
+            redemptionReferenceId: session.id,
+          },
+        });
+        if (reserved.count === 0) {
+          throw new HttpError(409, "Reward is already in use.");
+        }
+      }
+
+      return {
+        insufficient: false as const,
+        session,
+        rewardMetadata: toSessionRewardMetadata({
+          rewardApplication: rewardAdjustedMinimum.rewardApplication,
+          serviceType,
+          walletBalance: wallet.balance,
+        }),
+      };
     });
+
+    if (creationResult.insufficient) {
+      res.status(402).json({
+        code: INSUFFICIENT_WALLET_BALANCE_CODE,
+        message: "Please add money to continue.",
+        requiredBalance: creationResult.requiredBalance,
+        walletBalance: creationResult.walletBalance,
+      });
+      return;
+    }
+
+    const session = creationResult.session;
     void sendIncomingRequestPush({
       id: session.id,
       companionId: session.companionId,
@@ -1088,7 +1204,7 @@ sessionsRouter.post(
       });
     });
     res.status(201).json({
-      session: toSessionResponse(session, authUser.id),
+      session: toSessionResponse(session, authUser.id, creationResult.rewardMetadata),
     });
   }),
 );
@@ -1209,7 +1325,9 @@ const endSessionHandler = asyncHandler(async (req, res) => {
   const baseBilling = calculateSessionCharge(session, durationSeconds);
 
   const updated = await prisma.$transaction(async (tx) => {
-    const billing = await calculateRewardAdjustedBilling(tx, session.userId, session.serviceType, baseBilling, now);
+    const billing = await calculateRewardAdjustedBilling(tx, session.userId, session.serviceType, baseBilling, now, {
+      reservationReferenceId: session.id,
+    });
     const sessionSplit = splitAmount(billing.totalCharge, 30, 70);
     const companionEarning = Math.max(0, Math.round(sessionSplit.partnerAmount));
     const platformFee = billing.totalCharge - companionEarning;
@@ -1315,9 +1433,9 @@ const endSessionHandler = asyncHandler(async (req, res) => {
       }
     }
 
-    if (chargeSucceeded) {
-      await redeemSessionReward(tx, billing.rewardApplication, session.id, now);
+    await redeemSessionReward(tx, billing.rewardApplication, session.id, now);
 
+    if (chargeSucceeded) {
       await tx.partnerEarning.upsert({
         where: {
           sourceType_sessionId: {
