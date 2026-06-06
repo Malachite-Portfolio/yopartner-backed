@@ -24,6 +24,10 @@ const envSchema = z.object({
   AGORA_CHAT_APP_NAME: z.string().optional(),
   RAZORPAY_KEY_ID: z.string().optional().default(""),
   RAZORPAY_KEY_SECRET: z.string().optional().default(""),
+  ENABLE_WEB_PUSH_NOTIFICATIONS: z.string().optional().default("false"),
+  VAPID_PUBLIC_KEY: z.string().optional().default(""),
+  VAPID_PRIVATE_KEY: z.string().optional().default(""),
+  VAPID_SUBJECT: z.string().optional().default("mailto:support@yopartner.com"),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);

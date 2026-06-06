@@ -25,6 +25,7 @@ import {
   assertUserCanStartSession,
 } from "../utils/moderation";
 import { getFixedSessionRate } from "../config/platformPricing";
+import { sendIncomingRequestPush } from "../services/pushNotifications";
 
 const createSessionSchema = z.object({
   bookingId: z.string().optional(),
@@ -1053,6 +1054,17 @@ sessionsRouter.post(
         lastHeartbeatAt: new Date(),
         amount: getFixedSessionRate(serviceType),
       },
+    });
+    void sendIncomingRequestPush({
+      id: session.id,
+      companionId: session.companionId,
+      serviceType: session.serviceType,
+    }).catch((error) => {
+      console.error("[push] incoming request dispatch failed", {
+        sessionId: session.id,
+        companionId: session.companionId,
+        error,
+      });
     });
     res.status(201).json({
       session: toSessionResponse(session, authUser.id),

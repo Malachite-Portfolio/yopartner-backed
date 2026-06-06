@@ -171,6 +171,7 @@ model User {
   partnerEarnings PartnerEarning[]
   luckyWheelSpins LuckyWheelSpin[]
   rewards        UserReward[]
+  pushSubscriptions PushSubscription[]
 }
 
 model Companion {
@@ -212,6 +213,7 @@ model Companion {
   partnerEarnings     PartnerEarning[]
   reviews             Review[]               @relation("CompanionReviews")
   verificationRecord  VerificationRecord?
+  pushSubscriptions   PushSubscription[]
 }
 
 model PartnerApplication {
@@ -455,6 +457,24 @@ model Payout {
   rejectionReason String?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
+}
+
+model PushSubscription {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companionId String?
+  companion   Companion? @relation(fields: [companionId], references: [id], onDelete: SetNull)
+  endpoint    String    @unique
+  p256dh      String
+  auth        String
+  userAgent   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  revokedAt   DateTime?
+
+  @@index([userId, revokedAt])
+  @@index([companionId, revokedAt])
 }
 
 model Review {
