@@ -27,6 +27,10 @@ import {
 } from "../utils/moderation";
 import { getFixedSessionRate } from "../config/platformPricing";
 import { sendIncomingRequestPush } from "../services/pushNotifications";
+import {
+  finalizeStartedSessionRewardReservation,
+  normalizeUserRewardReservations,
+} from "../services/rewardReservations";
 
 const createSessionSchema = z.object({
   bookingId: z.string().optional(),
@@ -1246,6 +1250,7 @@ sessionsRouter.post(
 
     const sessionId = createSessionId();
     const creationResult = await prisma.$transaction(async (tx) => {
+      await normalizeUserRewardReservations(tx, authUser.id);
       const wallet = await tx.walletAccount.upsert({
         where: { userId: authUser.id },
         update: {},
@@ -1435,15 +1440,20 @@ sessionsRouter.post(
     }
 
     const updated = await prisma.$transaction(async (tx) => {
+      const now = new Date();
       const updated = await tx.session.update({
         where: { id: session.id },
         data: {
           status: SessionStatus.CANCELLED,
-          endedAt: session.endedAt ?? new Date(),
+          endedAt: session.endedAt ?? now,
           endedByUserId: authUser.id,
         },
       });
-      await releaseUnstartedSessionReward(tx, session);
+      if (session.startedAt || session.liveStartedAt) {
+        await finalizeStartedSessionRewardReservation(tx, session.id, now);
+      } else {
+        await releaseUnstartedSessionReward(tx, session);
+      }
       return updated;
     });
 

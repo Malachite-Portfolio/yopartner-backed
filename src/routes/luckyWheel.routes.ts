@@ -11,6 +11,7 @@ import { requireAuth } from "../middlewares/auth";
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { createCode } from "../utils/http";
+import { normalizeUserRewardReservations } from "../services/rewardReservations";
 
 type LuckyWheelRewardConfig = {
   id: string;
@@ -115,6 +116,7 @@ async function expireOldRewards(userId: string, now: Date) {
 
 async function getLuckyWheelState(userId: string, now = new Date()) {
   await expireOldRewards(userId, now);
+  await prisma.$transaction((tx) => normalizeUserRewardReservations(tx, userId, now));
 
   const [lastSpin, activeRewards] = await Promise.all([
     prisma.luckyWheelSpin.findFirst({
@@ -127,6 +129,7 @@ async function getLuckyWheelState(userId: string, now = new Date()) {
         userId,
         status: UserRewardStatus.ACTIVE,
         expiresAt: { gt: now },
+        redemptionReferenceId: null,
       },
       orderBy: { createdAt: "asc" },
     }),
@@ -185,6 +188,7 @@ async function spinForUser(userId: string) {
           },
           data: { status: UserRewardStatus.EXPIRED },
         });
+        await normalizeUserRewardReservations(tx, userId, now);
 
         const lastSpin = await tx.luckyWheelSpin.findFirst({
           where: { userId },
@@ -199,6 +203,7 @@ async function spinForUser(userId: string) {
               userId,
               status: UserRewardStatus.ACTIVE,
               expiresAt: { gt: now },
+              redemptionReferenceId: null,
             },
             orderBy: { createdAt: "asc" },
           });
@@ -315,6 +320,7 @@ async function spinForUser(userId: string) {
             userId,
             status: UserRewardStatus.ACTIVE,
             expiresAt: { gt: now },
+            redemptionReferenceId: null,
           },
           orderBy: { createdAt: "asc" },
         });
