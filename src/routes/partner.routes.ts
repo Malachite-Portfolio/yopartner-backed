@@ -106,7 +106,57 @@ const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.LIVE, SessionSta
 const PENDING_PAYOUT_STATUSES: PayoutStatus[] = [PayoutStatus.REQUESTED, PayoutStatus.APPROVED];
 const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
 const KYC_STORAGE_PREFIX = "YoPartner/partner-kyc/";
-const REQUIRED_KYC_DOCUMENTS_MESSAGE = "Please upload all required verification documents before submitting.";
+const partnerApplicationFieldLabels: Record<string, string> = {
+  fullName: "Full Name",
+  age: "Age",
+  gender: "Gender",
+  religion: "Religion",
+  bornCity: "Born City",
+  nationality: "Nationality",
+  school: "School",
+  college: "College",
+  qualification: "Qualification",
+  languagesKnown: "Languages",
+  communicationStyle: "Communication Style",
+  hobbies: "Hobbies",
+  profileTagline: "Profile Tagline",
+  aboutYourself: "About Yourself",
+  servicesOffered: "Services",
+  categories: "Categories",
+  safetyChecklist: "Safety checklist",
+  selfieUploaded: "Selfie",
+  selfieStoragePath: "Selfie upload path",
+  aadhaarFrontUploaded: "Aadhaar Front",
+  aadhaarFrontStoragePath: "Aadhaar Front upload path",
+  aadhaarBackUploaded: "Aadhaar Back",
+  aadhaarBackStoragePath: "Aadhaar Back upload path",
+  panUploaded: "PAN",
+  panStoragePath: "PAN upload path",
+  liveVerificationName: "Live verification name",
+  liveVerificationAge: "Live verification age",
+  liveVerificationHobbies: "Live verification hobbies",
+  liveVideoUploaded: "Live video",
+  liveVideoStoragePath: "Live video upload path",
+};
+
+function getPartnerApplicationValidationDetails(error: ZodError) {
+  const issues = error.issues.map((issue) => {
+    const field = issue.path.join(".") || "payload";
+    const label = partnerApplicationFieldLabels[String(issue.path[0] ?? "")] ?? field;
+    return {
+      field,
+      label,
+      message: issue.message,
+    };
+  });
+  const firstIssue = issues[0];
+  return {
+    issues,
+    message: firstIssue
+      ? `${firstIssue.label}: ${firstIssue.message}`
+      : "Invalid partner application payload.",
+  };
+}
 
 function isPartnerPresenceFresh(companion: { isOnline: boolean; updatedAt: Date }) {
   if (!companion.isOnline) return false;
@@ -282,9 +332,16 @@ function isPartnerKycPathForUser(storagePath: string | null, firebaseUid: string
 function assertRequiredKycDocument(
   document: ReturnType<typeof sanitizeKycDocument>,
   firebaseUid: string | null | undefined,
+  label: string,
 ) {
-  if (!document.uploaded || !isPartnerKycPathForUser(document.storagePath, firebaseUid)) {
-    throw new HttpError(400, REQUIRED_KYC_DOCUMENTS_MESSAGE);
+  if (!document.uploaded) {
+    throw new HttpError(400, `${label}: upload is missing.`);
+  }
+  if (!document.storagePath) {
+    throw new HttpError(400, `${label}: upload path is missing.`);
+  }
+  if (!isPartnerKycPathForUser(document.storagePath, firebaseUid)) {
+    throw new HttpError(400, `${label}: upload path does not match your login session. Please reselect and upload this document.`);
   }
 }
 
@@ -299,14 +356,17 @@ partnerRouter.post(
     try {
       const parsed = onboardingSchema.safeParse(req.body);
       if (!parsed.success) {
+        const validation = getPartnerApplicationValidationDetails(parsed.error);
         console.error("Partner application submit failed", {
-          message: "Validation failed",
+          message: validation.message,
           code: "VALIDATION_ERROR",
-          meta: parsed.error.flatten(),
+          meta: validation.issues,
         });
         res.status(400).json({
-          error: "Unable to submit partner application.",
+          error: validation.message,
+          message: validation.message,
           detail: "VALIDATION_ERROR",
+          validationErrors: validation.issues,
         });
         return;
       }
@@ -349,10 +409,10 @@ partnerRouter.post(
         storagePath: payload.liveVideoStoragePath,
       });
 
-      assertRequiredKycDocument(selfie, authUser.firebaseUid);
-      assertRequiredKycDocument(aadhaarFront, authUser.firebaseUid);
-      assertRequiredKycDocument(aadhaarBack, authUser.firebaseUid);
-      assertRequiredKycDocument(pan, authUser.firebaseUid);
+      assertRequiredKycDocument(selfie, authUser.firebaseUid, "Selfie");
+      assertRequiredKycDocument(aadhaarFront, authUser.firebaseUid, "Aadhaar Front");
+      assertRequiredKycDocument(aadhaarBack, authUser.firebaseUid, "Aadhaar Back");
+      assertRequiredKycDocument(pan, authUser.firebaseUid, "PAN");
 
       const liveVerificationName = sanitizeOptionalString(payload.liveVerificationName);
       const liveVerificationHobbies = sanitizeOptionalString(payload.liveVerificationHobbies);
@@ -360,11 +420,18 @@ partnerRouter.post(
         !liveVerificationName ||
         !payload.liveVerificationAge ||
         !liveVerificationHobbies ||
-        !liveVideo.uploaded ||
-        !isPartnerKycPathForUser(liveVideo.storagePath, authUser.firebaseUid) ||
-        !(liveVideo.storagePath ?? "").includes("/live-video/")
+        !liveVideo.uploaded
       ) {
         throw new HttpError(400, "Please complete live video verification before submitting.");
+      }
+      if (!liveVideo.storagePath) {
+        throw new HttpError(400, "Live video: upload path is missing.");
+      }
+      if (!isPartnerKycPathForUser(liveVideo.storagePath, authUser.firebaseUid)) {
+        throw new HttpError(400, "Live video: upload path does not match your login session. Please record and upload live verification again.");
+      }
+      if (!liveVideo.storagePath.includes("/live-video/")) {
+        throw new HttpError(400, "Live video: upload path is invalid. Please record and upload live verification again.");
       }
 
       const application = await prisma.partnerApplication.create({
