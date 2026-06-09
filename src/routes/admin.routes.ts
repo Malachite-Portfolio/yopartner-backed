@@ -639,6 +639,80 @@ adminRouter.patch(
   }),
 );
 
+adminRouter.patch(
+  "/partners/:id/delete",
+  asyncHandler(async (req, res) => {
+    const companionId = String(req.params.id ?? "").trim();
+    if (!companionId) throw new HttpError(400, "Partner ID is required.");
+
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (!reason) throw new HttpError(400, "reason is required.");
+
+    const companion = await prisma.companion.findUnique({ where: { id: companionId } });
+    if (!companion) throw new HttpError(404, "Partner not found.");
+    const previousStatus = resolvePartnerModerationStatus(companion);
+    const nextStatus = PartnerModerationStatus.HIDDEN;
+    const moderatedBy = req.authUser?.adminLoginId ?? req.authUser?.phoneNumber ?? req.authUser?.id ?? "ADMIN";
+
+    const result = await prisma.$transaction(async (tx) => {
+      const nextCompanion = await tx.companion.update({
+        where: { id: companion.id },
+        data: {
+          moderationStatus: nextStatus,
+          moderationReason: reason,
+          moderationExpiresAt: null,
+          moderatedAt: new Date(),
+          moderatedBy,
+          isOnline: false,
+        },
+      });
+
+      const pendingSessions = await tx.session.updateMany({
+        where: {
+          companionId: companion.id,
+          status: SessionStatus.PENDING,
+          endedAt: null,
+        },
+        data: {
+          status: SessionStatus.CANCELLED,
+          endedAt: new Date(),
+        },
+      });
+
+      await tx.moderationAction.create({
+        data: {
+          targetType: ModerationTargetType.PARTNER,
+          targetId: companion.id,
+          actionType: "PARTNER_REMOVED",
+          previousStatus,
+          newStatus: nextStatus,
+          reason,
+          expiresAt: null,
+          adminId: req.authUser?.id ?? "ADMIN",
+          adminEmail:
+            typeof req.body?.adminEmail === "string" && req.body.adminEmail.trim().length > 0
+              ? req.body.adminEmail.trim()
+              : null,
+        },
+      });
+
+      return {
+        companion: nextCompanion,
+        cancelledPendingRequests: pendingSessions.count,
+      };
+    });
+
+    res.json({
+      companion: {
+        ...result.companion,
+        moderationStatus: resolvePartnerModerationStatus(result.companion),
+      },
+      cancelledPendingRequests: result.cancelledPendingRequests,
+      message: "Host removed successfully.",
+    });
+  }),
+);
+
 adminRouter.get(
   "/moderation/actions",
   asyncHandler(async (req, res) => {

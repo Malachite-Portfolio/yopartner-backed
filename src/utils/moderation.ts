@@ -70,7 +70,11 @@ export function assertPartnerDashboardAccess(
 ) {
   if (!companion) return;
   const status = resolvePartnerModerationStatus(companion);
-  if (status === PartnerModerationStatus.BANNED || status === PartnerModerationStatus.TEMP_BANNED) {
+  if (
+    status === PartnerModerationStatus.BANNED ||
+    status === PartnerModerationStatus.TEMP_BANNED ||
+    status === PartnerModerationStatus.HIDDEN
+  ) {
     throw new HttpError(403, "Partner dashboard is blocked for this account.");
   }
 }
@@ -80,7 +84,11 @@ export function toUserBlocked(status: UserModerationStatus) {
 }
 
 export function toPartnerOffline(status: PartnerModerationStatus) {
-  return status === PartnerModerationStatus.BANNED || status === PartnerModerationStatus.TEMP_BANNED;
+  return (
+    status === PartnerModerationStatus.BANNED ||
+    status === PartnerModerationStatus.TEMP_BANNED ||
+    status === PartnerModerationStatus.HIDDEN
+  );
 }
 
 export function isUserTemporaryStatus(status: UserModerationStatus): status is TemporaryStatus {
