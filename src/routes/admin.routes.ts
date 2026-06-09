@@ -42,6 +42,7 @@ const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 const MAX_MANUAL_WALLET_CREDIT_AMOUNT = 10_000;
 const KYC_STORAGE_PREFIX = "YoPartner/partner-kyc/";
+const PARTNER_REMOVED_ACTION_TYPE = "PARTNER_REMOVED";
 
 adminRouter.use(requireAdminAccess);
 
@@ -483,14 +484,41 @@ adminRouter.get(
         })
       : [];
     const busySet = new Set(busySessions.map((session) => session.companionId));
+    const latestActionByPartnerId = new Map<string, string>();
+    if (companionIds.length > 0) {
+      const latestActions = await prisma.moderationAction.findMany({
+        where: {
+          targetType: ModerationTargetType.PARTNER,
+          targetId: { in: companionIds },
+        },
+        orderBy: { createdAt: "desc" },
+        select: {
+          targetId: true,
+          actionType: true,
+        },
+      });
+      for (const action of latestActions) {
+        if (!latestActionByPartnerId.has(action.targetId)) {
+          latestActionByPartnerId.set(action.targetId, action.actionType);
+        }
+      }
+    }
 
     res.json({
       companions: companions.map((companion) => {
         const isBusy = busySet.has(companion.id);
         const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+        const moderationStatus = resolvePartnerModerationStatus(companion);
+        const latestModerationActionType = latestActionByPartnerId.get(companion.id) ?? null;
+        const isRemoved =
+          moderationStatus === PartnerModerationStatus.HIDDEN &&
+          latestModerationActionType === PARTNER_REMOVED_ACTION_TYPE;
         return {
           ...withFixedCompanionPrices(companion),
-          moderationStatus: resolvePartnerModerationStatus(companion),
+          moderationStatus,
+          latestModerationActionType,
+          isRemoved,
+          removalStatus: isRemoved ? "REMOVED" : null,
           isBusy,
           effectiveStatus,
         };
@@ -683,7 +711,7 @@ adminRouter.patch(
         data: {
           targetType: ModerationTargetType.PARTNER,
           targetId: companion.id,
-          actionType: "PARTNER_REMOVED",
+          actionType: PARTNER_REMOVED_ACTION_TYPE,
           previousStatus,
           newStatus: nextStatus,
           reason,
@@ -706,6 +734,9 @@ adminRouter.patch(
       companion: {
         ...result.companion,
         moderationStatus: resolvePartnerModerationStatus(result.companion),
+        latestModerationActionType: PARTNER_REMOVED_ACTION_TYPE,
+        isRemoved: true,
+        removalStatus: "REMOVED",
       },
       cancelledPendingRequests: result.cancelledPendingRequests,
       message: "Host removed successfully.",
