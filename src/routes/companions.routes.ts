@@ -433,6 +433,7 @@ companionsRouter.get(
     res.setHeader("Cache-Control", "private, max-age=300");
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
     res.setHeader("X-Content-Type-Options", "nosniff");
 
     await new Promise<void>((resolve, reject) => {
