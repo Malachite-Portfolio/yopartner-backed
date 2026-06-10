@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
   CompanionStatus,
+  PartnerApplicationStatus,
   PartnerEarningSourceType,
   PartnerEarningStatus,
   PayoutStatus,
@@ -434,63 +435,86 @@ partnerRouter.post(
         throw new HttpError(400, "Live video: upload path is invalid. Please record and upload live verification again.");
       }
 
-      const application = await prisma.partnerApplication.create({
-        data: {
+      const applicationData = {
+        fullName: payload.fullName,
+        age: payload.age,
+        gender: payload.gender,
+        religion: payload.religion,
+        bornCity: payload.bornCity,
+        nationality: payload.nationality,
+        school: payload.school,
+        college: payload.college,
+        qualification: payload.qualification,
+        languagesKnown: payload.languagesKnown,
+        communicationStyle: payload.communicationStyle,
+        hobbies: payload.hobbies,
+        profileTagline: payload.profileTagline,
+        aboutYourself: payload.aboutYourself,
+        servicesOffered,
+        chatPrice: CHAT_RATE_PER_MIN,
+        audioPrice: AUDIO_RATE_PER_MIN,
+        videoPrice: VIDEO_RATE_PER_MIN,
+        homeVisitRequested: Boolean(payload.homeVisitRequested),
+        homeVisitPrice: payload.homeVisitRequested ? HOME_VISIT_RATE_PER_HOUR : null,
+        categories: payload.categories,
+        safetyChecklist: payload.safetyChecklist,
+        selfieUploaded: selfie.uploaded,
+        selfieFileName: selfie.fileName,
+        selfieStoragePath: selfie.storagePath,
+        selfieUrl: selfie.url,
+        aadhaarFrontUploaded: aadhaarFront.uploaded,
+        aadhaarFrontFileName: aadhaarFront.fileName,
+        aadhaarFrontStoragePath: aadhaarFront.storagePath,
+        aadhaarFrontUrl: aadhaarFront.url,
+        aadhaarBackUploaded: aadhaarBack.uploaded,
+        aadhaarBackFileName: aadhaarBack.fileName,
+        aadhaarBackStoragePath: aadhaarBack.storagePath,
+        aadhaarBackUrl: aadhaarBack.url,
+        panUploaded: pan.uploaded,
+        panFileName: pan.fileName,
+        panStoragePath: pan.storagePath,
+        panUrl: pan.url,
+        liveVerificationName,
+        liveVerificationAge: payload.liveVerificationAge,
+        liveVerificationHobbies,
+        liveVideoUploaded: liveVideo.uploaded,
+        liveVideoFileName: liveVideo.fileName,
+        liveVideoStoragePath: liveVideo.storagePath,
+        liveVerificationSubmittedAt: new Date(),
+      };
+
+      const existingEditableApplication = await prisma.partnerApplication.findFirst({
+        where: {
           applicantUserId: authUser.id,
-          fullName: payload.fullName,
-          age: payload.age,
-          gender: payload.gender,
-          religion: payload.religion,
-          bornCity: payload.bornCity,
-          nationality: payload.nationality,
-          school: payload.school,
-          college: payload.college,
-          qualification: payload.qualification,
-          languagesKnown: payload.languagesKnown,
-          communicationStyle: payload.communicationStyle,
-          hobbies: payload.hobbies,
-          profileTagline: payload.profileTagline,
-          aboutYourself: payload.aboutYourself,
-          servicesOffered,
-          chatPrice: CHAT_RATE_PER_MIN,
-          audioPrice: AUDIO_RATE_PER_MIN,
-          videoPrice: VIDEO_RATE_PER_MIN,
-          homeVisitRequested: Boolean(payload.homeVisitRequested),
-          homeVisitPrice: payload.homeVisitRequested ? HOME_VISIT_RATE_PER_HOUR : null,
-          categories: payload.categories,
-          safetyChecklist: payload.safetyChecklist,
-          selfieUploaded: selfie.uploaded,
-          selfieFileName: selfie.fileName,
-          selfieStoragePath: selfie.storagePath,
-          selfieUrl: selfie.url,
-          aadhaarFrontUploaded: aadhaarFront.uploaded,
-          aadhaarFrontFileName: aadhaarFront.fileName,
-          aadhaarFrontStoragePath: aadhaarFront.storagePath,
-          aadhaarFrontUrl: aadhaarFront.url,
-          aadhaarBackUploaded: aadhaarBack.uploaded,
-          aadhaarBackFileName: aadhaarBack.fileName,
-          aadhaarBackStoragePath: aadhaarBack.storagePath,
-          aadhaarBackUrl: aadhaarBack.url,
-          panUploaded: pan.uploaded,
-          panFileName: pan.fileName,
-          panStoragePath: pan.storagePath,
-          panUrl: pan.url,
-          liveVerificationName,
-          liveVerificationAge: payload.liveVerificationAge,
-          liveVerificationHobbies,
-          liveVideoUploaded: liveVideo.uploaded,
-          liveVideoFileName: liveVideo.fileName,
-          liveVideoStoragePath: liveVideo.storagePath,
-          liveVerificationSubmittedAt: new Date(),
+          status: {
+            in: [PartnerApplicationStatus.UNDER_REVIEW, PartnerApplicationStatus.NEEDS_INFO],
+          },
         },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
       });
+
+      const application = existingEditableApplication
+        ? await prisma.partnerApplication.update({
+            where: { id: existingEditableApplication.id },
+            data: {
+              ...applicationData,
+              status: PartnerApplicationStatus.UNDER_REVIEW,
+            },
+          })
+        : await prisma.partnerApplication.create({
+            data: {
+              applicantUserId: authUser.id,
+              ...applicationData,
+            },
+          });
 
       await prisma.user.update({
         where: { id: authUser.id },
         data: { role: Role.PARTNER, name: payload.fullName },
       });
 
-      res.status(201).json({ application });
+      res.status(existingEditableApplication ? 200 : 201).json({ application });
     } catch (error) {
       const httpStatus = error instanceof HttpError ? error.statusCode : undefined;
       const detail =
