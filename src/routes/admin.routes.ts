@@ -175,6 +175,18 @@ function withFixedApplicationPrices<
   };
 }
 
+function getApplicationSelfieProfileMedia(application: {
+  selfieStoragePath: string | null;
+  selfieUrl: string | null;
+}) {
+  return {
+    profileImageStoragePath: application.selfieStoragePath?.trim() || undefined,
+    profileImageUrl: application.selfieStoragePath?.trim()
+      ? undefined
+      : application.selfieUrl?.trim() || undefined,
+  };
+}
+
 function parseTransactionType(value: unknown): TransactionType | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toUpperCase();
@@ -812,9 +824,21 @@ adminRouter.get(
         categories: true,
         safetyChecklist: true,
         selfieUploaded: true,
+        selfieFileName: true,
+        selfieStoragePath: true,
+        selfieUrl: true,
         aadhaarFrontUploaded: true,
+        aadhaarFrontFileName: true,
+        aadhaarFrontStoragePath: true,
+        aadhaarFrontUrl: true,
         aadhaarBackUploaded: true,
+        aadhaarBackFileName: true,
+        aadhaarBackStoragePath: true,
+        aadhaarBackUrl: true,
         panUploaded: true,
+        panFileName: true,
+        panStoragePath: true,
+        panUrl: true,
         liveVerificationName: true,
         liveVerificationAge: true,
         liveVerificationHobbies: true,
@@ -851,6 +875,8 @@ adminRouter.get(
             status: true,
             verificationStatus: true,
             isOnline: true,
+            profileImageUrl: true,
+            profileImageStoragePath: true,
             createdAt: true,
             updatedAt: true,
           },
@@ -893,9 +919,21 @@ adminRouter.get(
         categories: true,
         safetyChecklist: true,
         selfieUploaded: true,
+        selfieFileName: true,
+        selfieStoragePath: true,
+        selfieUrl: true,
         aadhaarFrontUploaded: true,
+        aadhaarFrontFileName: true,
+        aadhaarFrontStoragePath: true,
+        aadhaarFrontUrl: true,
         aadhaarBackUploaded: true,
+        aadhaarBackFileName: true,
+        aadhaarBackStoragePath: true,
+        aadhaarBackUrl: true,
         panUploaded: true,
+        panFileName: true,
+        panStoragePath: true,
+        panUrl: true,
         liveVerificationName: true,
         liveVerificationAge: true,
         liveVerificationHobbies: true,
@@ -932,6 +970,8 @@ adminRouter.get(
             status: true,
             verificationStatus: true,
             isOnline: true,
+            profileImageUrl: true,
+            profileImageStoragePath: true,
             createdAt: true,
             updatedAt: true,
           },
@@ -1106,11 +1146,15 @@ adminRouter.patch(
               : await tx.companion.findUnique({ where: { userId: application.applicantUserId } });
 
           if (companion) {
+            const selfieProfileMedia = getApplicationSelfieProfileMedia(application);
             await tx.companion.update({
               where: { id: companion.id },
               data: {
                 status: CompanionStatus.ACTIVE,
                 verificationStatus: VerificationStatus.VERIFIED,
+                ...(!companion.profileImageUrl && !companion.profileImageStoragePath
+                  ? selfieProfileMedia
+                  : {}),
                 chatPrice: CHAT_RATE_PER_MIN,
                 audioPrice: AUDIO_RATE_PER_MIN,
                 videoPrice: VIDEO_RATE_PER_MIN,
@@ -1135,6 +1179,7 @@ adminRouter.patch(
                 category: application.categories[0] ?? null,
                 languages: application.languagesKnown,
                 servicesOffered: application.servicesOffered,
+                ...getApplicationSelfieProfileMedia(application),
                 chatPrice: CHAT_RATE_PER_MIN,
                 audioPrice: AUDIO_RATE_PER_MIN,
                 videoPrice: VIDEO_RATE_PER_MIN,

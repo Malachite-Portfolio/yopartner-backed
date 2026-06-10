@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import {
   CompanionStatus,
   HomeVisitVerificationStatus,
@@ -10,6 +10,7 @@ import {
 import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { resolvePartnerModerationStatus } from "../utils/moderation";
+import { firebaseAdminStorage } from "../config/firebaseAdmin";
 import {
   AUDIO_RATE_PER_MIN,
   CHAT_RATE_PER_MIN,
@@ -21,6 +22,12 @@ export const companionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
+const KYC_STORAGE_PREFIX = "YoPartner/partner-kyc/";
+
+type ApprovedSelfieFallback = {
+  selfieStoragePath: string | null;
+  selfieUrl: string | null;
+} | null | undefined;
 
 function isPresenceFresh(companion: { isOnline: boolean; updatedAt: Date }) {
   if (!companion.isOnline) return false;
@@ -28,6 +35,7 @@ function isPresenceFresh(companion: { isOnline: boolean; updatedAt: Date }) {
 }
 
 function toPublicCompanionSummary(
+  req: Request,
   companion: {
     id: string;
     displayName: string;
@@ -43,14 +51,15 @@ function toPublicCompanionSummary(
     isOnline: boolean;
     updatedAt: Date;
     profileImageUrl: string | null;
+    profileImageStoragePath?: string | null;
     galleryImageUrls: string[];
   },
-  profileImageFallback: string | null | undefined,
+  approvedSelfieFallback: ApprovedSelfieFallback,
   isBusy: boolean,
 ) {
   const effectiveOnline = isPresenceFresh(companion);
   const effectiveStatus = isBusy ? "BUSY" : effectiveOnline ? "ONLINE" : "OFFLINE";
-  const profileImageUrl = companion.profileImageUrl ?? profileImageFallback ?? null;
+  const profileImageUrl = resolvePublicProfileImageUrl(req, companion, approvedSelfieFallback);
 
   return {
     id: companion.id,
@@ -133,6 +142,102 @@ function sanitizePublicUrls(values: string[] | null | undefined) {
     .filter((value): value is string => Boolean(value));
 }
 
+function getRequestOrigin(req: Request) {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim();
+  const protocol = forwardedProto || req.protocol || "https";
+  const host = req.get("host");
+  return host ? `${protocol}://${host}` : "";
+}
+
+function getCompanionProfileImageProxyUrl(req: Request, companionId: string) {
+  const origin = getRequestOrigin(req);
+  const path = `/api/companions/${encodeURIComponent(companionId)}/profile-image`;
+  return origin ? `${origin}${path}` : path;
+}
+
+function resolvePublicProfileImageUrl(
+  req: Request,
+  companion: { id: string; profileImageUrl: string | null; profileImageStoragePath?: string | null },
+  approvedSelfieFallback: ApprovedSelfieFallback,
+) {
+  const customProfileImageUrl = sanitizePublicUrl(companion.profileImageUrl);
+  if (customProfileImageUrl) return customProfileImageUrl;
+
+  const selfieStoragePath = cleanText(companion.profileImageStoragePath) || cleanText(approvedSelfieFallback?.selfieStoragePath);
+  if (selfieStoragePath) return getCompanionProfileImageProxyUrl(req, companion.id);
+
+  return sanitizePublicUrl(approvedSelfieFallback?.selfieUrl);
+}
+
+function parseFirebaseStorageUrl(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.hostname === "firebasestorage.googleapis.com") {
+      const match = url.pathname.match(/^\/v0\/b\/([^/]+)\/o\/(.+)$/);
+      if (!match) return null;
+      return {
+        bucketName: decodeURIComponent(match[1]),
+        objectPath: decodeURIComponent(match[2]),
+      };
+    }
+    if (url.hostname === "storage.googleapis.com") {
+      const [, bucketName, ...pathParts] = url.pathname.split("/");
+      if (!bucketName || pathParts.length === 0) return null;
+      return {
+        bucketName: decodeURIComponent(bucketName),
+        objectPath: decodeURIComponent(pathParts.join("/")),
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function resolveKycStorageObject(storagePath: string | null, url: string | null) {
+  const normalizedStoragePath = storagePath?.trim() ?? "";
+  if (normalizedStoragePath.startsWith("gs://")) {
+    const withoutScheme = normalizedStoragePath.slice("gs://".length);
+    const slashIndex = withoutScheme.indexOf("/");
+    if (slashIndex > 0) {
+      return {
+        bucketName: withoutScheme.slice(0, slashIndex),
+        objectPath: withoutScheme.slice(slashIndex + 1),
+      };
+    }
+  }
+
+  if (normalizedStoragePath && !/^https?:\/\//i.test(normalizedStoragePath)) {
+    return {
+      bucketName: null,
+      objectPath: normalizedStoragePath.replace(/^\/+/, ""),
+    };
+  }
+
+  const parsedUrl = url ? parseFirebaseStorageUrl(url) : null;
+  if (parsedUrl) return parsedUrl;
+
+  if (normalizedStoragePath) {
+    const parsedStoragePathUrl = parseFirebaseStorageUrl(normalizedStoragePath);
+    if (parsedStoragePathUrl) return parsedStoragePathUrl;
+  }
+
+  return null;
+}
+
+const latestApprovedSelfieSelect = {
+  where: {
+    status: PartnerApplicationStatus.APPROVED,
+    OR: [{ selfieStoragePath: { not: null } }, { selfieUrl: { not: null } }],
+  },
+  orderBy: { createdAt: "desc" as const },
+  take: 1,
+  select: {
+    selfieStoragePath: true,
+    selfieUrl: true,
+  },
+};
+
 async function getBusyCompanionIds(companionIds: string[]) {
   if (companionIds.length === 0) return new Set<string>();
   const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
@@ -185,6 +290,9 @@ companionsRouter.get(
             }
           : {}),
       },
+      include: {
+        partnerApplications: latestApprovedSelfieSelect,
+      },
       orderBy: [{ isOnline: "desc" }, { rating: "desc" }],
     });
     const visibleCompanions = companions.filter((companion) => isCompanionVisibleForListing(companion));
@@ -192,7 +300,7 @@ companionsRouter.get(
     const busySet = await getBusyCompanionIds(visibleCompanions.map((companion) => companion.id));
     const summaries = visibleCompanions.map((companion) => {
       const isBusy = busySet.has(companion.id);
-      return toPublicCompanionSummary(companion, companion.profileImageUrl, isBusy);
+      return toPublicCompanionSummary(req, companion, companion.partnerApplications[0], isBusy);
     });
     res.json({
       companions: online ? summaries.filter((companion) => companion.effectiveStatus !== "OFFLINE") : summaries,
@@ -202,12 +310,15 @@ companionsRouter.get(
 
 companionsRouter.get(
   "/featured",
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
     const companions = await prisma.companion.findMany({
       where: {
         status: CompanionStatus.ACTIVE,
         verificationStatus: VerificationStatus.VERIFIED,
         moderationStatus: { notIn: [PartnerModerationStatus.BANNED, PartnerModerationStatus.TEMP_BANNED, PartnerModerationStatus.HIDDEN] },
+      },
+      include: {
+        partnerApplications: latestApprovedSelfieSelect,
       },
       orderBy: [{ rating: "desc" }],
       take: 12,
@@ -217,7 +328,7 @@ companionsRouter.get(
     res.json({
       companions: visibleCompanions.map((companion) => {
         const isBusy = busySet.has(companion.id);
-        return toPublicCompanionSummary(companion, companion.profileImageUrl, isBusy);
+        return toPublicCompanionSummary(req, companion, companion.partnerApplications[0], isBusy);
       }),
     });
   }),
@@ -240,7 +351,7 @@ companionsRouter.get(
 
 companionsRouter.get(
   "/home-visits",
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
     const companions = await prisma.companion.findMany({
       where: {
         status: CompanionStatus.ACTIVE,
@@ -248,14 +359,87 @@ companionsRouter.get(
         moderationStatus: PartnerModerationStatus.ACTIVE,
         homeVisitVerificationStatus: HomeVisitVerificationStatus.APPROVED,
       },
+      include: {
+        partnerApplications: latestApprovedSelfieSelect,
+      },
       orderBy: [{ isOnline: "desc" }, { rating: "desc" }],
     });
     const busySet = await getBusyCompanionIds(companions.map((companion) => companion.id));
     res.json({
       companions: companions.map((companion) => {
         const isBusy = busySet.has(companion.id);
-        return toPublicCompanionSummary(companion, companion.profileImageUrl, isBusy);
+        return toPublicCompanionSummary(req, companion, companion.partnerApplications[0], isBusy);
       }),
+    });
+  }),
+);
+
+companionsRouter.get(
+  "/:id/profile-image",
+  asyncHandler(async (req, res) => {
+    if (!firebaseAdminStorage) {
+      res.status(404).json({ error: "NOT_FOUND", message: "Profile image storage is not configured." });
+      return;
+    }
+
+    const companion = await prisma.companion.findFirst({
+      where: {
+        id: String(req.params.id),
+        status: CompanionStatus.ACTIVE,
+        verificationStatus: VerificationStatus.VERIFIED,
+        moderationStatus: PartnerModerationStatus.ACTIVE,
+      },
+      select: {
+        id: true,
+        profileImageUrl: true,
+        profileImageStoragePath: true,
+        partnerApplications: latestApprovedSelfieSelect,
+      },
+    });
+
+    if (!companion) {
+      res.status(404).json({ error: "NOT_FOUND", message: "Partner not found." });
+      return;
+    }
+    const customProfileImageUrl = sanitizePublicUrl(companion.profileImageUrl);
+    if (customProfileImageUrl) {
+      res.redirect(customProfileImageUrl);
+      return;
+    }
+
+    const selfieFallback = companion.partnerApplications[0] ?? null;
+    const storageObject = resolveKycStorageObject(
+      companion.profileImageStoragePath ?? selfieFallback?.selfieStoragePath ?? null,
+      selfieFallback?.selfieUrl ?? null,
+    );
+    if (!storageObject?.objectPath || !storageObject.objectPath.startsWith(KYC_STORAGE_PREFIX)) {
+      res.status(404).json({ error: "NOT_FOUND", message: "Profile image not found." });
+      return;
+    }
+
+    const bucket = storageObject.bucketName
+      ? firebaseAdminStorage.bucket(storageObject.bucketName)
+      : firebaseAdminStorage.bucket();
+    const file = bucket.file(storageObject.objectPath);
+    const [exists] = await file.exists();
+    if (!exists) {
+      res.status(404).json({ error: "NOT_FOUND", message: "Profile image file not found." });
+      return;
+    }
+
+    const [metadata] = await file.getMetadata();
+    const contentType = metadata.contentType || "image/jpeg";
+
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+
+    await new Promise<void>((resolve, reject) => {
+      const stream = file.createReadStream();
+      stream.on("error", reject);
+      stream.on("end", resolve);
+      stream.pipe(res);
     });
   }),
 );
@@ -273,6 +457,7 @@ companionsRouter.get(
           moderationStatus: PartnerModerationStatus.ACTIVE,
         },
         include: {
+          partnerApplications: latestApprovedSelfieSelect,
           _count: {
             select: {
               sessions: true,
@@ -319,6 +504,8 @@ companionsRouter.get(
         hobbies: string[];
         aboutYourself: string | null;
         profileTagline: string | null;
+        selfieStoragePath: string | null;
+        selfieUrl: string | null;
       } | null = null;
 
       try {
@@ -341,6 +528,8 @@ companionsRouter.get(
             hobbies: true,
             aboutYourself: true,
             profileTagline: true,
+            selfieStoragePath: true,
+            selfieUrl: true,
           },
         });
       } catch (error) {
@@ -411,7 +600,11 @@ companionsRouter.get(
             .filter(Boolean),
         ),
       );
-      const profileImageUrl = sanitizePublicUrl(companion.profileImageUrl);
+      const approvedSelfieFallback = {
+        selfieStoragePath: latestProfile?.selfieStoragePath ?? null,
+        selfieUrl: latestProfile?.selfieUrl ?? null,
+      };
+      const profileImageUrl = resolvePublicProfileImageUrl(req, companion, approvedSelfieFallback);
       const galleryUrls = sanitizePublicUrls(companion.galleryImageUrls);
       const city = cleanText(companion.city);
       const reviews = publicReviews
@@ -424,13 +617,14 @@ companionsRouter.get(
         .filter((review) => review.comment.length > 0);
 
       const summary = toPublicCompanionSummary(
+        req,
         {
           ...companion,
           languages,
           galleryImageUrls: galleryUrls,
           profileImageUrl,
         },
-        profileImageUrl,
+        approvedSelfieFallback,
         isBusy,
       );
 

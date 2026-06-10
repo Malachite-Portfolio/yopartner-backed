@@ -305,6 +305,22 @@ function sanitizeOptionalString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function getRequestOrigin(req: { headers: Record<string, unknown>; protocol?: string; get(name: string): string | undefined }) {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim();
+  const protocol = forwardedProto || req.protocol || "https";
+  const host = req.get("host");
+  return host ? `${protocol}://${host}` : "";
+}
+
+function getCompanionProfileImageProxyUrl(
+  req: { headers: Record<string, unknown>; protocol?: string; get(name: string): string | undefined },
+  companionId: string,
+) {
+  const origin = getRequestOrigin(req);
+  const path = `/api/companions/${encodeURIComponent(companionId)}/profile-image`;
+  return origin ? `${origin}${path}` : path;
+}
+
 function sanitizeKycDocument(input: {
   uploaded?: boolean;
   fileName?: string;
@@ -1217,15 +1233,19 @@ partnerRouter.get(
     const latestApplicationWithSelfie = await prisma.partnerApplication.findFirst({
       where: {
         applicantUserId: authUser.id,
-        selfieUrl: { not: null },
+        OR: [{ selfieStoragePath: { not: null } }, { selfieUrl: { not: null } }],
       },
       orderBy: { createdAt: "desc" },
       select: {
+        selfieStoragePath: true,
         selfieUrl: true,
       },
     });
 
-    const resolvedProfileImageUrl = companion.profileImageUrl ?? latestApplicationWithSelfie?.selfieUrl ?? null;
+    const selfieStoragePath = companion.profileImageStoragePath || latestApplicationWithSelfie?.selfieStoragePath || null;
+    const resolvedProfileImageUrl =
+      companion.profileImageUrl ??
+      (selfieStoragePath ? getCompanionProfileImageProxyUrl(req, companion.id) : latestApplicationWithSelfie?.selfieUrl ?? null);
 
     const galleryItems = companion.galleryImageUrls.map((imageUrl, index) => ({
       imageUrl,
