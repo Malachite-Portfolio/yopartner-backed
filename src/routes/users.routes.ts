@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { SessionStatus } from "@prisma/client";
+import { LuckyWheelRewardType, Prisma, SessionStatus, ServiceType, UserRewardSource, UserRewardStatus } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth } from "../middlewares/auth";
 import { asyncHandler } from "../utils/asyncHandler";
@@ -58,6 +58,14 @@ const reviewSchema = z.object({
 });
 
 export const usersRouter = Router();
+const WELCOME_CHAT_FREE_MINUTES = 10;
+const WELCOME_REWARD_EXPIRY_YEARS = 10;
+
+function addYears(date: Date, years: number) {
+  const next = new Date(date);
+  next.setFullYear(next.getFullYear() + years);
+  return next;
+}
 
 function isUserProfileComplete(user: {
   name: string | null;
@@ -72,6 +80,43 @@ function isUserProfileComplete(user: {
     user.profileImageUrl && isSafeProfileImageUrl(user.profileImageUrl),
   );
   return hasName && hasEmail && hasAge && hasSafeProfileImage;
+}
+
+async function grantWelcomeFirstChatReward(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  now: Date,
+) {
+  const [existingWelcomeReward, startedChatCount] = await Promise.all([
+    tx.userReward.findFirst({
+      where: {
+        userId,
+        source: UserRewardSource.WELCOME_PROFILE,
+      },
+      select: { id: true },
+    }),
+    tx.session.count({
+      where: {
+        userId,
+        serviceType: ServiceType.CHAT,
+        OR: [{ startedAt: { not: null } }, { liveStartedAt: { not: null } }],
+      },
+    }),
+  ]);
+
+  if (existingWelcomeReward || startedChatCount > 0) return null;
+
+  return tx.userReward.create({
+    data: {
+      userId,
+      type: LuckyWheelRewardType.FREE_CHAT_MINUTES,
+      value: WELCOME_CHAT_FREE_MINUTES,
+      remainingValue: WELCOME_CHAT_FREE_MINUTES,
+      status: UserRewardStatus.ACTIVE,
+      source: UserRewardSource.WELCOME_PROFILE,
+      expiresAt: addYears(now, WELCOME_REWARD_EXPIRY_YEARS),
+    },
+  });
 }
 
 usersRouter.get(
@@ -153,6 +198,54 @@ usersRouter.get(
   }),
 );
 
+usersRouter.get(
+  "/me/rewards/welcome-chat",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const now = new Date();
+
+    await prisma.userReward.updateMany({
+      where: {
+        userId: authUser.id,
+        status: UserRewardStatus.ACTIVE,
+        expiresAt: { lte: now },
+      },
+      data: { status: UserRewardStatus.EXPIRED },
+    });
+
+    const [reward, startedChatCount] = await Promise.all([
+      prisma.userReward.findFirst({
+        where: {
+          userId: authUser.id,
+          source: UserRewardSource.WELCOME_PROFILE,
+          type: LuckyWheelRewardType.FREE_CHAT_MINUTES,
+          status: UserRewardStatus.ACTIVE,
+          remainingValue: { gt: 0 },
+          expiresAt: { gt: now },
+          redemptionReferenceId: null,
+        },
+        orderBy: { createdAt: "asc" },
+      }),
+      prisma.session.count({
+        where: {
+          userId: authUser.id,
+          serviceType: ServiceType.CHAT,
+          OR: [{ startedAt: { not: null } }, { liveStartedAt: { not: null } }],
+        },
+      }),
+    ]);
+
+    const available = Boolean(reward && startedChatCount === 0);
+    res.json({
+      available,
+      label: "First chat: 10 min free",
+      minutes: available ? reward?.remainingValue ?? WELCOME_CHAT_FREE_MINUTES : 0,
+      rewardId: available ? reward?.id ?? null : null,
+    });
+  }),
+);
+
 usersRouter.patch(
   "/me",
   requireAuth,
@@ -175,21 +268,59 @@ usersRouter.patch(
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
     const body = profileDetailsSchema.parse(req.body);
-    const user = await prisma.user.update({
-      where: { id: authUser.id },
-      data: {
-        name: body.name,
-        email: body.email,
-        age: body.age,
-        gender: body.gender ?? null,
-        profileImageUrl: body.profileImageUrl,
-        onboardingCompletedAt: new Date(),
-      },
-      include: {
-        walletAccount: true,
-      },
+    const now = new Date();
+    const result = await prisma.$transaction(async (tx) => {
+      const existing = await tx.user.findUnique({
+        where: { id: authUser.id },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          age: true,
+          profileImageUrl: true,
+        },
+      });
+      if (!existing) return null;
+
+      const wasComplete = isUserProfileComplete(existing);
+      const user = await tx.user.update({
+        where: { id: authUser.id },
+        data: {
+          name: body.name,
+          email: body.email,
+          age: body.age,
+          gender: body.gender ?? null,
+          profileImageUrl: body.profileImageUrl,
+          onboardingCompletedAt: now,
+        },
+        include: {
+          walletAccount: true,
+        },
+      });
+
+      const profileComplete = isUserProfileComplete(user);
+      const welcomeReward = !wasComplete && profileComplete
+        ? await grantWelcomeFirstChatReward(tx, authUser.id, now)
+        : null;
+
+      return { user, profileComplete, welcomeReward };
     });
-    res.json({ user, profileComplete: isUserProfileComplete(user) });
+    if (!result) {
+      res.status(404).json({ error: "USER_NOT_FOUND", message: "User not found." });
+      return;
+    }
+
+    res.json({
+      user: result.user,
+      profileComplete: result.profileComplete,
+      welcomeReward: result.welcomeReward
+        ? {
+            id: result.welcomeReward.id,
+            label: "First chat: 10 min free",
+            minutes: result.welcomeReward.remainingValue,
+          }
+        : null,
+    });
   }),
 );
 

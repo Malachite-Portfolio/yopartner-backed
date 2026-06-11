@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
-import { Role } from "@prisma/client";
+import { Role, UserModerationStatus } from "@prisma/client";
 import type { DecodedIdToken } from "firebase-admin/auth";
 import { env } from "../config/env";
 import { firebaseAdminAuth, isFirebaseAdminConfigured } from "../config/firebaseAdmin";
@@ -86,6 +86,11 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
       await prisma.walletAccount.create({
         data: { userId: user.id },
       });
+    }
+
+    if (user.isBlocked && user.moderationStatus === UserModerationStatus.BANNED) {
+      res.status(403).json({ error: "ACCOUNT_REMOVED", message: "This account has been removed from active platform access." });
+      return;
     }
 
     req.authUser = {

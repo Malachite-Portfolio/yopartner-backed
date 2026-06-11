@@ -43,6 +43,7 @@ const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, Sessio
 const MAX_MANUAL_WALLET_CREDIT_AMOUNT = 10_000;
 const KYC_STORAGE_PREFIX = "YoPartner/partner-kyc/";
 const PARTNER_REMOVED_ACTION_TYPE = "PARTNER_REMOVED";
+const USER_REMOVED_ACTION_TYPE = "USER_REMOVED";
 
 adminRouter.use(requireAdminAccess);
 
@@ -610,6 +611,136 @@ adminRouter.patch(
 );
 
 adminRouter.patch(
+  "/users/:id/delete",
+  asyncHandler(async (req, res) => {
+    const userId = String(req.params.id ?? "").trim();
+    if (!userId) throw new HttpError(400, "User ID is required.");
+
+    const confirmation = typeof req.body?.confirmation === "string" ? req.body.confirmation.trim() : "";
+    if (confirmation !== "REMOVE") {
+      throw new HttpError(400, "Type REMOVE to confirm user removal.");
+    }
+
+    const reason = typeof req.body?.reason === "string" && req.body.reason.trim().length > 0
+      ? req.body.reason.trim()
+      : "Admin removed user from active platform access.";
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { companion: true },
+    });
+    if (!user) throw new HttpError(404, "User not found.");
+    if (user.role === Role.ADMIN || user.id === req.authUser?.id) {
+      throw new HttpError(400, "Admin accounts cannot remove themselves through this action.");
+    }
+
+    const previousStatus = resolveUserModerationStatus(user);
+    const moderatedBy = req.authUser?.adminLoginId ?? req.authUser?.phoneNumber ?? req.authUser?.id ?? "ADMIN";
+    const now = new Date();
+
+    const result = await prisma.$transaction(async (tx) => {
+      const nextUser = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          name: "Removed User",
+          email: null,
+          age: null,
+          gender: null,
+          profileImageUrl: null,
+          isBlocked: true,
+          moderationStatus: UserModerationStatus.BANNED,
+          moderationReason: reason,
+          moderationExpiresAt: null,
+          moderatedAt: now,
+          moderatedBy,
+        },
+      });
+
+      const cancelledSessions = await tx.session.updateMany({
+        where: {
+          userId: user.id,
+          status: { in: [SessionStatus.PENDING, ...ACTIVE_SESSION_STATUSES] },
+          endedAt: null,
+        },
+        data: {
+          status: SessionStatus.CANCELLED,
+          endedAt: now,
+          endedByUserId: user.id,
+        },
+      });
+
+      await tx.pushSubscription.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: now },
+      });
+
+      if (user.companion) {
+        await tx.companion.update({
+          where: { id: user.companion.id },
+          data: {
+            status: CompanionStatus.SUSPENDED,
+            moderationStatus: PartnerModerationStatus.HIDDEN,
+            moderationReason: reason,
+            moderationExpiresAt: null,
+            moderatedAt: now,
+            moderatedBy,
+            isOnline: false,
+            displayName: "Removed Partner",
+            tagline: null,
+            city: null,
+            category: null,
+            languages: [],
+            servicesOffered: [],
+            profileImageUrl: null,
+            profileImageStoragePath: null,
+            galleryImageUrls: [],
+            galleryImageStoragePaths: [],
+          },
+        });
+
+        await tx.pushSubscription.updateMany({
+          where: { companionId: user.companion.id, revokedAt: null },
+          data: { revokedAt: now },
+        });
+      }
+
+      await tx.moderationAction.create({
+        data: {
+          targetType: ModerationTargetType.USER,
+          targetId: user.id,
+          actionType: USER_REMOVED_ACTION_TYPE,
+          previousStatus,
+          newStatus: UserModerationStatus.BANNED,
+          reason,
+          expiresAt: null,
+          adminId: req.authUser?.id ?? "ADMIN",
+          adminEmail:
+            typeof req.body?.adminEmail === "string" && req.body.adminEmail.trim().length > 0
+              ? req.body.adminEmail.trim()
+              : null,
+        },
+      });
+
+      return {
+        user: nextUser,
+        cancelledSessions: cancelledSessions.count,
+      };
+    });
+
+    res.json({
+      user: {
+        ...result.user,
+        moderationStatus: resolveUserModerationStatus(result.user),
+        latestModerationActionType: USER_REMOVED_ACTION_TYPE,
+        removalStatus: "REMOVED",
+      },
+      cancelledSessions: result.cancelledSessions,
+      message: "User removed from active platform access. Historical records were preserved.",
+    });
+  }),
+);
+
+adminRouter.patch(
   "/partners/:id/status",
   asyncHandler(async (req, res) => {
     const companionId = String(req.params.id ?? "").trim();
@@ -690,24 +821,39 @@ adminRouter.patch(
 
     const companion = await prisma.companion.findUnique({ where: { id: companionId } });
     if (!companion) throw new HttpError(404, "Partner not found.");
+    if (companion.userId === req.authUser?.id) {
+      throw new HttpError(400, "Admins cannot remove their own partner profile through this action.");
+    }
     const previousStatus = resolvePartnerModerationStatus(companion);
     const nextStatus = PartnerModerationStatus.HIDDEN;
     const moderatedBy = req.authUser?.adminLoginId ?? req.authUser?.phoneNumber ?? req.authUser?.id ?? "ADMIN";
+    const now = new Date();
 
     const result = await prisma.$transaction(async (tx) => {
       const nextCompanion = await tx.companion.update({
         where: { id: companion.id },
         data: {
+          status: CompanionStatus.SUSPENDED,
           moderationStatus: nextStatus,
           moderationReason: reason,
           moderationExpiresAt: null,
-          moderatedAt: new Date(),
+          moderatedAt: now,
           moderatedBy,
           isOnline: false,
+          displayName: "Removed Partner",
+          tagline: null,
+          city: null,
+          category: null,
+          languages: [],
+          servicesOffered: [],
+          profileImageUrl: null,
+          profileImageStoragePath: null,
+          galleryImageUrls: [],
+          galleryImageStoragePaths: [],
         },
       });
 
-      const pendingSessions = await tx.session.updateMany({
+      const cancelledPendingRequests = await tx.session.updateMany({
         where: {
           companionId: companion.id,
           status: SessionStatus.PENDING,
@@ -715,8 +861,40 @@ adminRouter.patch(
         },
         data: {
           status: SessionStatus.CANCELLED,
-          endedAt: new Date(),
+          endedAt: now,
         },
+      });
+
+      const endedActiveSessions = await tx.session.updateMany({
+        where: {
+          companionId: companion.id,
+          status: { in: ACTIVE_SESSION_STATUSES },
+          endedAt: null,
+        },
+        data: {
+          status: SessionStatus.ENDED,
+          endedAt: now,
+          endedByUserId: companion.userId,
+        },
+      });
+
+      await tx.partnerApplication.updateMany({
+        where: {
+          OR: [{ companionId: companion.id }, { applicantUserId: companion.userId }],
+          status: { in: [PartnerApplicationStatus.UNDER_REVIEW, PartnerApplicationStatus.NEEDS_INFO] },
+        },
+        data: {
+          status: PartnerApplicationStatus.REJECTED,
+          adminNote: "Partner removed from active platform access.",
+        },
+      });
+
+      await tx.pushSubscription.updateMany({
+        where: {
+          OR: [{ companionId: companion.id }, { userId: companion.userId }],
+          revokedAt: null,
+        },
+        data: { revokedAt: now },
       });
 
       await tx.moderationAction.create({
@@ -738,7 +916,8 @@ adminRouter.patch(
 
       return {
         companion: nextCompanion,
-        cancelledPendingRequests: pendingSessions.count,
+        cancelledPendingRequests: cancelledPendingRequests.count,
+        endedActiveSessions: endedActiveSessions.count,
       };
     });
 
@@ -751,6 +930,7 @@ adminRouter.patch(
         removalStatus: "REMOVED",
       },
       cancelledPendingRequests: result.cancelledPendingRequests,
+      endedActiveSessions: result.endedActiveSessions,
       message: "Host removed successfully.",
     });
   }),

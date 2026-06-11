@@ -9,6 +9,7 @@ import {
   SessionStatus,
   TransactionStatus,
   TransactionType,
+  UserRewardSource,
   UserRewardStatus,
   VerificationStatus,
 } from "@prisma/client";
@@ -150,11 +151,7 @@ function getMinimumWalletBalanceForSession(serviceType: ServiceType) {
 
 function getMinimumBillingForSessionStart(serviceType: ServiceType): BaseSessionBilling {
   const ratePerMinute = getMinimumWalletBalanceForSession(serviceType);
-  return {
-    ratePerMinute,
-    billableMinutes: 1,
-    totalCharge: ratePerMinute,
-  };
+  return calculateSessionCharge({ amount: ratePerMinute, serviceType }, 1);
 }
 
 function calculateSessionCharge(session: {
@@ -197,6 +194,7 @@ function zeroSessionBilling(serviceType: ServiceType): RewardAdjustedBilling {
 type RewardApplication = {
   rewardId: string;
   type: LuckyWheelRewardType;
+  source: UserRewardSource;
   originalValue: number;
   usedValue: number;
   remainingValue: number;
@@ -212,6 +210,8 @@ type RewardAdjustedBilling = BaseSessionBilling & {
 type SessionRewardMetadata = {
   appliedRewardId: string;
   appliedRewardType: LuckyWheelRewardType;
+  appliedRewardSource: UserRewardSource;
+  label: string;
   freeSeconds: number | null;
   shouldAutoEndAtFreeLimit: boolean;
 };
@@ -222,7 +222,10 @@ type SessionBillingLimitMetadata = {
   autoEndAt: string | null;
 };
 
-function getRewardLabel(type: LuckyWheelRewardType, value: number) {
+function getRewardLabel(type: LuckyWheelRewardType, value: number, source?: UserRewardSource) {
+  if (source === UserRewardSource.WELCOME_PROFILE && type === LuckyWheelRewardType.FREE_CHAT_MINUTES) {
+    return "First Chat Free - 10 Minutes";
+  }
   if (type === LuckyWheelRewardType.FREE_CHAT_MINUTES) return `${value} free chat minute${value === 1 ? "" : "s"}`;
   if (type === LuckyWheelRewardType.FREE_CALL_MINUTES) return `${value} free audio minute${value === 1 ? "" : "s"}`;
   if (type === LuckyWheelRewardType.VIDEO_DISCOUNT_PERCENT) return `${value}% video discount`;
@@ -237,7 +240,7 @@ function matchingRewardType(serviceType: ServiceType) {
 }
 
 async function calculateRewardAdjustedBilling(
-  tx: Pick<Prisma.TransactionClient, "userReward">,
+  tx: Pick<Prisma.TransactionClient, "session" | "userReward">,
   userId: string,
   serviceType: ServiceType,
   baseBilling: BaseSessionBilling,
@@ -281,6 +284,25 @@ async function calculateRewardAdjustedBilling(
     return { ...baseBilling, normalCharge: baseBilling.totalCharge, rewardApplication: null };
   }
 
+  if (reward.source === UserRewardSource.WELCOME_PROFILE) {
+    if (serviceType !== ServiceType.CHAT) {
+      return { ...baseBilling, normalCharge: baseBilling.totalCharge, rewardApplication: null };
+    }
+
+    const priorStartedChatCount = await tx.session.count({
+      where: {
+        userId,
+        serviceType: ServiceType.CHAT,
+        ...(options?.reservationReferenceId ? { id: { not: options.reservationReferenceId } } : {}),
+        OR: [{ startedAt: { not: null } }, { liveStartedAt: { not: null } }],
+      },
+    });
+
+    if (priorStartedChatCount > 0) {
+      return { ...baseBilling, normalCharge: baseBilling.totalCharge, rewardApplication: null };
+    }
+  }
+
   if (reward.type === LuckyWheelRewardType.VIDEO_DISCOUNT_PERCENT) {
     const discountAmount = Math.min(
       baseBilling.totalCharge,
@@ -293,11 +315,12 @@ async function calculateRewardAdjustedBilling(
       rewardApplication: {
         rewardId: reward.id,
         type: reward.type,
+        source: reward.source,
         originalValue: reward.value,
         usedValue: reward.remainingValue,
         remainingValue: 0,
         discountAmount,
-        label: getRewardLabel(reward.type, reward.value),
+        label: getRewardLabel(reward.type, reward.value, reward.source),
       },
     };
   }
@@ -312,17 +335,18 @@ async function calculateRewardAdjustedBilling(
     rewardApplication: {
       rewardId: reward.id,
       type: reward.type,
+      source: reward.source,
       originalValue: reward.value,
       usedValue: freeMinutes,
       remainingValue: Math.max(0, reward.remainingValue - freeMinutes),
       discountAmount,
-      label: getRewardLabel(reward.type, reward.value),
+      label: getRewardLabel(reward.type, reward.value, reward.source),
     },
   };
 }
 
 async function calculateAffordableSessionBilling(params: {
-  tx: Pick<Prisma.TransactionClient, "userReward">;
+  tx: Pick<Prisma.TransactionClient, "session" | "userReward">;
   userId: string;
   serviceType: ServiceType;
   requestedDurationSeconds: number;
@@ -417,17 +441,19 @@ function buildSessionBillingLimit(params: {
 function toRewardApplication(reward: {
   id: string;
   type: LuckyWheelRewardType;
+  source: UserRewardSource;
   value: number;
   remainingValue: number;
 }): RewardApplication {
   return {
     rewardId: reward.id,
     type: reward.type,
+    source: reward.source,
     originalValue: reward.value,
     usedValue: reward.remainingValue,
     remainingValue: 0,
     discountAmount: 0,
-    label: getRewardLabel(reward.type, reward.value),
+    label: getRewardLabel(reward.type, reward.value, reward.source),
   };
 }
 
@@ -445,6 +471,8 @@ function toSessionRewardMetadata(params: {
   return {
     appliedRewardId: reward.rewardId,
     appliedRewardType: reward.type,
+    appliedRewardSource: reward.source,
+    label: reward.label,
     freeSeconds,
     shouldAutoEndAtFreeLimit: Boolean(freeSeconds && params.walletBalance < getFixedSessionRate(params.serviceType)),
   } satisfies SessionRewardMetadata;
@@ -518,7 +546,8 @@ function buildSessionChargeReason(params: {
 }) {
   const base = `Session charge for ${params.sessionCode} (${params.serviceType}) - ${params.billing.billableMinutes} min x INR ${params.billing.ratePerMinute}`;
   if (!params.billing.rewardApplication) return base;
-  return `${base}; Lucky Wheel reward applied: ${params.billing.rewardApplication.label}, discount INR ${params.billing.rewardApplication.discountAmount}`;
+  const rewardSource = params.billing.rewardApplication.source === UserRewardSource.WELCOME_PROFILE ? "Welcome bonus" : "Lucky Wheel reward";
+  return `${base}; ${rewardSource} applied: ${params.billing.rewardApplication.label}, discount INR ${params.billing.rewardApplication.discountAmount}`;
 }
 
 function buildGiftMessageBody(gift: {

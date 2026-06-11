@@ -83,6 +83,7 @@ enum UserRewardStatus {
 
 enum UserRewardSource {
   LUCKY_WHEEL
+  WELCOME_PROFILE
 }
 
 enum PayoutStatus {
