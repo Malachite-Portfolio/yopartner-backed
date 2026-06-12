@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  CompanionAvailability,
   CompanionStatus,
   LuckyWheelRewardType,
   PartnerEarningSourceType,
@@ -32,6 +33,7 @@ import {
   finalizeStartedSessionRewardReservation,
   normalizeUserRewardReservations,
 } from "../services/rewardReservations";
+import { isCompanionOnlineForRequests } from "../utils/partnerAvailability";
 
 const createSessionSchema = z.object({
   bookingId: z.string().optional(),
@@ -113,7 +115,6 @@ const giftMessagePayloadSchema = z.object({
 export const sessionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
-const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
 const INSUFFICIENT_WALLET_BALANCE_CODE = "INSUFFICIENT_WALLET_BALANCE";
 
 function roundToTwo(value: number) {
@@ -591,11 +592,6 @@ function parseGiftMessageBody(body: string) {
   } catch {
     return null;
   }
-}
-
-function isCompanionPresenceOnline(companion: { isOnline: boolean; updatedAt: Date }) {
-  if (!companion.isOnline) return false;
-  return Date.now() - companion.updatedAt.getTime() <= PARTNER_PRESENCE_STALE_MS;
 }
 
 function hashToPositiveInt(input: string) {
@@ -1201,7 +1197,10 @@ sessionsRouter.post(
       select: { id: true },
     });
     const hasActiveChatEscalationContext = Boolean(activeChatBetweenPair);
-    if (!isCompanionPresenceOnline(companion) && !hasActiveChatEscalationContext) {
+    if (companion.availability === CompanionAvailability.BUSY && !hasActiveChatEscalationContext) {
+      throw new HttpError(409, "Partner is currently busy.");
+    }
+    if (!isCompanionOnlineForRequests(companion) && !hasActiveChatEscalationContext) {
       throw new HttpError(409, "Partner is currently offline.");
     }
 

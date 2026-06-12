@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  CompanionAvailability,
   CompanionStatus,
   PartnerApplicationStatus,
   PartnerEarningSourceType,
@@ -22,6 +23,10 @@ import { createCode, HttpError } from "../utils/http";
 import { firebaseAdminAuth, isFirebaseAdminConfigured } from "../config/firebaseAdmin";
 import { env } from "../config/env";
 import { assertPartnerDashboardAccess } from "../utils/moderation";
+import {
+  isCompanionListedOnline,
+  resolveCompanionAvailability,
+} from "../utils/partnerAvailability";
 import {
   AUDIO_RATE_PER_MIN,
   CHAT_RATE_PER_MIN,
@@ -105,7 +110,6 @@ const MAX_GALLERY_IMAGES = 6;
 const STALE_LIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.LIVE, SessionStatus.ACCEPTED];
 const PENDING_PAYOUT_STATUSES: PayoutStatus[] = [PayoutStatus.REQUESTED, PayoutStatus.APPROVED];
-const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
 const KYC_STORAGE_PREFIX = "YoPartner/partner-kyc/";
 const partnerApplicationFieldLabels: Record<string, string> = {
   fullName: "Full Name",
@@ -157,17 +161,6 @@ function getPartnerApplicationValidationDetails(error: ZodError) {
       ? `${firstIssue.label}: ${firstIssue.message}`
       : "Invalid partner application payload.",
   };
-}
-
-function isPartnerPresenceFresh(companion: { isOnline: boolean; updatedAt: Date }) {
-  if (!companion.isOnline) return false;
-  return Date.now() - companion.updatedAt.getTime() <= PARTNER_PRESENCE_STALE_MS;
-}
-
-function resolveEffectiveStatus(params: { isBusy: boolean; presenceFresh: boolean }) {
-  if (params.isBusy) return "BUSY";
-  if (params.presenceFresh) return "ONLINE";
-  return "OFFLINE";
 }
 
 async function hasActiveCompanionSession(companionId: string) {
@@ -755,9 +748,11 @@ partnerRouter.get(
     }
 
     const isBusy = activeSessions.length > 0;
-    const isOnline = Boolean(companion?.isOnline);
-    const isPresenceOnline = companion ? isPartnerPresenceFresh(companion) : false;
-    const effectiveStatus = resolveEffectiveStatus({ isBusy, presenceFresh: isPresenceOnline });
+    const isOnline = companion ? companion.availability !== CompanionAvailability.OFFLINE : false;
+    const isPresenceOnline = companion ? isCompanionListedOnline(companion, isBusy) : false;
+    const effectiveStatus = companion
+      ? resolveCompanionAvailability(companion, isBusy)
+      : CompanionAvailability.OFFLINE;
 
     res.json({
       hasApplication: Boolean(application),
@@ -798,7 +793,7 @@ partnerRouter.get(
             status: companion.status,
             verificationStatus: companion.verificationStatus,
             isOnline: isPresenceOnline,
-            rawIsOnline: companion.isOnline,
+            rawIsOnline: isOnline,
             isBusy,
             effectiveStatus,
           }
@@ -1025,11 +1020,17 @@ partnerRouter.patch(
 
     const updated = await prisma.companion.update({
       where: { id: companion.id },
-      data: { isOnline: payload.isOnline },
+      data: {
+        isOnline: payload.isOnline,
+        availability: payload.isOnline
+          ? CompanionAvailability.ONLINE
+          : CompanionAvailability.OFFLINE,
+        availabilitySetByAdminAt: null,
+      },
     });
 
     res.json({
-      isOnline: updated.isOnline,
+      isOnline: updated.availability !== CompanionAvailability.OFFLINE,
       companion: updated,
     });
   }),
@@ -1050,17 +1051,22 @@ partnerRouter.post(
 
     const updated = await prisma.companion.update({
       where: { id: companion.id },
-      data: { isOnline: true },
+      data: {
+        isOnline: true,
+        availability: CompanionAvailability.ONLINE,
+        availabilitySetByAdminAt: null,
+      },
     });
     const isBusy = await hasActiveCompanionSession(updated.id);
-    const presenceFresh = isPartnerPresenceFresh(updated);
+    const effectiveStatus = resolveCompanionAvailability(updated, isBusy);
+    const presenceFresh = effectiveStatus !== CompanionAvailability.OFFLINE;
 
     res.json({
       isOnline: presenceFresh,
-      rawIsOnline: updated.isOnline,
+      rawIsOnline: updated.availability !== CompanionAvailability.OFFLINE,
       presenceFresh,
       isBusy,
-      effectiveStatus: resolveEffectiveStatus({ isBusy, presenceFresh }),
+      effectiveStatus,
       updatedAt: updated.updatedAt,
     });
   }),
@@ -1081,17 +1087,21 @@ partnerRouter.post(
 
     const updated = await prisma.companion.update({
       where: { id: companion.id },
-      data: { isOnline: companion.isOnline },
+      data: {
+        isOnline: companion.availability !== CompanionAvailability.OFFLINE,
+        availability: companion.availability,
+      },
     });
     const isBusy = await hasActiveCompanionSession(updated.id);
-    const presenceFresh = isPartnerPresenceFresh(updated);
+    const effectiveStatus = resolveCompanionAvailability(updated, isBusy);
+    const presenceFresh = effectiveStatus !== CompanionAvailability.OFFLINE;
 
     res.json({
       isOnline: presenceFresh,
-      rawIsOnline: updated.isOnline,
+      rawIsOnline: updated.availability !== CompanionAvailability.OFFLINE,
       presenceFresh,
       isBusy,
-      effectiveStatus: resolveEffectiveStatus({ isBusy, presenceFresh }),
+      effectiveStatus,
       updatedAt: updated.updatedAt,
     });
   }),
@@ -1112,7 +1122,11 @@ partnerRouter.post(
 
     const updated = await prisma.companion.update({
       where: { id: companion.id },
-      data: { isOnline: false },
+      data: {
+        isOnline: false,
+        availability: CompanionAvailability.OFFLINE,
+        availabilitySetByAdminAt: null,
+      },
     });
     const isBusy = await hasActiveCompanionSession(updated.id);
 
@@ -1121,7 +1135,7 @@ partnerRouter.post(
       rawIsOnline: updated.isOnline,
       presenceFresh: false,
       isBusy,
-      effectiveStatus: resolveEffectiveStatus({ isBusy, presenceFresh: false }),
+      effectiveStatus: CompanionAvailability.OFFLINE,
       updatedAt: updated.updatedAt,
     });
   }),
@@ -1170,7 +1184,11 @@ partnerRouter.post(
 
     await prisma.companion.updateMany({
       where: { userId: companionOwner.id },
-      data: { isOnline: false },
+      data: {
+        isOnline: false,
+        availability: CompanionAvailability.OFFLINE,
+        availabilitySetByAdminAt: null,
+      },
     });
 
     res.status(202).json({ ok: true });
@@ -1199,6 +1217,14 @@ partnerRouter.patch(
         city: typeof req.body.city === "string" ? req.body.city : companion.city,
         category: typeof req.body.category === "string" ? req.body.category : companion.category,
         isOnline: typeof req.body.isOnline === "boolean" ? req.body.isOnline : companion.isOnline,
+        availability:
+          typeof req.body.isOnline === "boolean"
+            ? req.body.isOnline
+              ? CompanionAvailability.ONLINE
+              : CompanionAvailability.OFFLINE
+            : companion.availability,
+        availabilitySetByAdminAt:
+          typeof req.body.isOnline === "boolean" ? null : companion.availabilitySetByAdminAt,
       },
     });
 

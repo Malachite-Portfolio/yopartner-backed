@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import {
+  CompanionAvailability,
   CompanionStatus,
   HomeVisitVerificationStatus,
   PartnerModerationStatus,
@@ -12,6 +13,10 @@ import { prisma } from "../db/prisma";
 import { resolvePartnerModerationStatus } from "../utils/moderation";
 import { firebaseAdminStorage } from "../config/firebaseAdmin";
 import {
+  isCompanionListedOnline,
+  resolveCompanionAvailability,
+} from "../utils/partnerAvailability";
+import {
   AUDIO_RATE_PER_MIN,
   CHAT_RATE_PER_MIN,
   HOME_VISIT_RATE_PER_HOUR,
@@ -21,18 +26,12 @@ import {
 export const companionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
-const PARTNER_PRESENCE_STALE_MS = 90 * 1000;
 const KYC_STORAGE_PREFIX = "YoPartner/partner-kyc/";
 
 type ApprovedSelfieFallback = {
   selfieStoragePath: string | null;
   selfieUrl: string | null;
 } | null | undefined;
-
-function isPresenceFresh(companion: { isOnline: boolean; updatedAt: Date }) {
-  if (!companion.isOnline) return false;
-  return Date.now() - companion.updatedAt.getTime() <= PARTNER_PRESENCE_STALE_MS;
-}
 
 function toPublicCompanionSummary(
   req: Request,
@@ -48,7 +47,8 @@ function toPublicCompanionSummary(
     audioPrice: number;
     videoPrice: number;
     rating: number;
-    isOnline: boolean;
+    availability: CompanionAvailability;
+    availabilitySetByAdminAt: Date | null;
     updatedAt: Date;
     profileImageUrl: string | null;
     profileImageStoragePath?: string | null;
@@ -57,8 +57,8 @@ function toPublicCompanionSummary(
   approvedSelfieFallback: ApprovedSelfieFallback,
   isBusy: boolean,
 ) {
-  const effectiveOnline = isPresenceFresh(companion);
-  const effectiveStatus = isBusy ? "BUSY" : effectiveOnline ? "ONLINE" : "OFFLINE";
+  const effectiveStatus = resolveCompanionAvailability(companion, isBusy);
+  const effectiveOnline = isCompanionListedOnline(companion, isBusy);
   const profileImageUrl = resolvePublicProfileImageUrl(req, companion, approvedSelfieFallback);
 
   return {

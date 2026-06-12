@@ -19,6 +19,12 @@ enum CompanionStatus {
   SUSPENDED
 }
 
+enum CompanionAvailability {
+  ONLINE
+  BUSY
+  OFFLINE
+}
+
 enum PartnerApplicationStatus {
   UNDER_REVIEW
   APPROVED
@@ -201,6 +207,8 @@ model Companion {
   homeVisitVerifiedAt         DateTime?
   homeVisitVerifiedBy         String?
   isOnline            Boolean                @default(false)
+  availability        CompanionAvailability  @default(OFFLINE)
+  availabilitySetByAdminAt DateTime?
   profileImageUrl     String?
   profileImageStoragePath String?
   galleryImageUrls    String[]               @default([])

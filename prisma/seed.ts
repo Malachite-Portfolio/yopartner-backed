@@ -1,4 +1,5 @@
 import {
+  CompanionAvailability,
   CompanionStatus,
   PrismaClient,
   Role,
@@ -58,6 +59,7 @@ async function upsertDemoHost() {
       status: CompanionStatus.ACTIVE,
       verificationStatus: VerificationStatus.VERIFIED,
       isOnline: true,
+      availability: CompanionAvailability.ONLINE,
     },
     create: {
       userId: user.id,
@@ -74,6 +76,7 @@ async function upsertDemoHost() {
       status: CompanionStatus.ACTIVE,
       verificationStatus: VerificationStatus.VERIFIED,
       isOnline: true,
+      availability: CompanionAvailability.ONLINE,
     },
   });
 

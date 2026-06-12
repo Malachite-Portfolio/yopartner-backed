@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  CompanionAvailability,
   CompanionStatus,
   HomeVisitVerificationStatus,
   ModerationTargetType,
@@ -36,6 +37,10 @@ import {
   HOME_VISIT_RATE_PER_HOUR,
   VIDEO_RATE_PER_MIN,
 } from "../config/platformPricing";
+import {
+  isCompanionListedOnline,
+  resolveCompanionAvailability,
+} from "../utils/partnerAvailability";
 
 export const adminRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
@@ -519,8 +524,9 @@ adminRouter.get(
 
     res.json({
       companions: companions.map((companion) => {
-        const isBusy = busySet.has(companion.id);
-        const effectiveStatus = !companion.isOnline ? "OFFLINE" : isBusy ? "BUSY" : "ONLINE";
+        const hasActiveSession = busySet.has(companion.id);
+        const effectiveStatus = resolveCompanionAvailability(companion, hasActiveSession);
+        const isBusy = effectiveStatus === CompanionAvailability.BUSY;
         const moderationStatus = resolvePartnerModerationStatus(companion);
         const latestModerationActionType = latestActionByPartnerId.get(companion.id) ?? null;
         const isRemoved =
@@ -532,10 +538,74 @@ adminRouter.get(
           latestModerationActionType,
           isRemoved,
           removalStatus: isRemoved ? "REMOVED" : null,
+          isOnline: isCompanionListedOnline(companion, hasActiveSession),
           isBusy,
           effectiveStatus,
         };
       }),
+    });
+  }),
+);
+
+adminRouter.patch(
+  "/companions/:id/availability",
+  asyncHandler(async (req, res) => {
+    const companionId = String(req.params.id ?? "").trim();
+    if (!companionId) throw new HttpError(400, "Partner ID is required.");
+
+    const availability = String(req.body?.availability ?? "").trim().toUpperCase();
+    if (
+      availability !== CompanionAvailability.ONLINE &&
+      availability !== CompanionAvailability.BUSY &&
+      availability !== CompanionAvailability.OFFLINE
+    ) {
+      throw new HttpError(400, "availability must be ONLINE, BUSY, or OFFLINE.");
+    }
+
+    const companion = await prisma.companion.findUnique({ where: { id: companionId } });
+    if (!companion) throw new HttpError(404, "Partner not found.");
+
+    const moderationStatus = resolvePartnerModerationStatus(companion);
+    if (
+      companion.status !== CompanionStatus.ACTIVE ||
+      companion.verificationStatus !== VerificationStatus.VERIFIED ||
+      moderationStatus !== PartnerModerationStatus.ACTIVE
+    ) {
+      throw new HttpError(
+        409,
+        "Availability can only be changed for approved, active partners who are not removed, banned, or suspended.",
+      );
+    }
+
+    const updated = await prisma.companion.update({
+      where: { id: companion.id },
+      data: {
+        availability,
+        availabilitySetByAdminAt: new Date(),
+        isOnline: availability !== CompanionAvailability.OFFLINE,
+      },
+    });
+
+    const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
+    const activeSession = await prisma.session.findFirst({
+      where: {
+        companionId: updated.id,
+        status: { in: ACTIVE_SESSION_STATUSES },
+        endedAt: null,
+        updatedAt: { gte: staleThreshold },
+      },
+      select: { id: true },
+    });
+    const effectiveStatus = resolveCompanionAvailability(updated, Boolean(activeSession));
+
+    res.json({
+      companion: {
+        ...updated,
+        isOnline: effectiveStatus !== CompanionAvailability.OFFLINE,
+        isBusy: effectiveStatus === CompanionAvailability.BUSY,
+        effectiveStatus,
+      },
+      message: `${updated.displayName} is now ${effectiveStatus.toLowerCase()}.`,
     });
   }),
 );
@@ -685,6 +755,8 @@ adminRouter.patch(
             moderatedAt: now,
             moderatedBy,
             isOnline: false,
+            availability: CompanionAvailability.OFFLINE,
+            availabilitySetByAdminAt: now,
             displayName: "Removed Partner",
             tagline: null,
             city: null,
@@ -778,6 +850,12 @@ adminRouter.patch(
           moderatedAt: new Date(),
           moderatedBy: req.authUser?.adminLoginId ?? req.authUser?.phoneNumber ?? req.authUser?.id ?? "ADMIN",
           isOnline: toPartnerOffline(nextStatus) ? false : companion.isOnline,
+          availability: toPartnerOffline(nextStatus)
+            ? CompanionAvailability.OFFLINE
+            : companion.availability,
+          availabilitySetByAdminAt: toPartnerOffline(nextStatus)
+            ? new Date()
+            : companion.availabilitySetByAdminAt,
         },
       });
 
@@ -840,6 +918,8 @@ adminRouter.patch(
           moderatedAt: now,
           moderatedBy,
           isOnline: false,
+          availability: CompanionAvailability.OFFLINE,
+          availabilitySetByAdminAt: now,
           displayName: "Removed Partner",
           tagline: null,
           city: null,
