@@ -97,6 +97,13 @@ function isCompanionVisibleForListing(companion: {
   return status !== PartnerModerationStatus.BANNED && status !== PartnerModerationStatus.TEMP_BANNED && status !== PartnerModerationStatus.HIDDEN;
 }
 
+function availabilityRank(status: CompanionAvailability | string | null | undefined) {
+  if (status === CompanionAvailability.ONLINE) return 0;
+  if (status === CompanionAvailability.BUSY) return 1;
+  if (status === CompanionAvailability.OFFLINE) return 2;
+  return 3;
+}
+
 function normalizeStringArray(value: string[] | null | undefined) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
@@ -302,8 +309,15 @@ companionsRouter.get(
       const isBusy = busySet.has(companion.id);
       return toPublicCompanionSummary(req, companion, companion.partnerApplications[0], isBusy);
     });
+    const sortedSummaries = summaries
+      .map((companion, index) => ({ companion, index }))
+      .sort((first, second) => {
+        const rankDelta = availabilityRank(first.companion.effectiveStatus) - availabilityRank(second.companion.effectiveStatus);
+        return rankDelta || first.index - second.index;
+      })
+      .map(({ companion }) => companion);
     res.json({
-      companions: online ? summaries.filter((companion) => companion.effectiveStatus !== "OFFLINE") : summaries,
+      companions: online ? sortedSummaries.filter((companion) => companion.effectiveStatus !== CompanionAvailability.OFFLINE) : sortedSummaries,
     });
   }),
 );
