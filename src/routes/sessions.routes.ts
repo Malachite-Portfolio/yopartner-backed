@@ -27,7 +27,7 @@ import {
   assertUserCanSendGifts,
   assertUserCanStartSession,
 } from "../utils/moderation";
-import { getFixedSessionRate } from "../config/platformPricing";
+import { CHAT_RATE_PER_MESSAGE, getFixedSessionRate } from "../config/platformPricing";
 import { sendIncomingRequestPush } from "../services/pushNotifications";
 import {
   finalizeStartedSessionRewardReservation,
@@ -43,6 +43,10 @@ const createSessionSchema = z.object({
 
 const sendMessageSchema = z.object({
   body: z.string().trim().min(1).max(1000),
+  clientMessageId: z.preprocess(
+    (value) => (typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined),
+    z.string().min(1).max(120).optional(),
+  ),
 });
 
 const markLiveSchema = z.object({
@@ -116,6 +120,7 @@ export const sessionsRouter = Router();
 const STALE_ACTIVE_SESSION_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_SESSION_STATUSES: SessionStatus[] = [SessionStatus.ACCEPTED, SessionStatus.LIVE];
 const INSUFFICIENT_WALLET_BALANCE_CODE = "INSUFFICIENT_WALLET_BALANCE";
+const CHAT_LOW_BALANCE_MESSAGE = "User wallet balance is low. Please add money to continue chatting.";
 
 function roundToTwo(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
@@ -551,6 +556,37 @@ function buildSessionChargeReason(params: {
   return `${base}; ${rewardSource} applied: ${params.billing.rewardApplication.label}, discount INR ${params.billing.rewardApplication.discountAmount}`;
 }
 
+function getChatFreeWindowBase(session: {
+  liveStartedAt?: Date | null;
+  startedAt?: Date | null;
+  acceptedAt?: Date | null;
+}) {
+  return session.liveStartedAt ?? session.startedAt ?? session.acceptedAt ?? null;
+}
+
+function isWithinFreeChatWindow(
+  session: {
+    liveStartedAt?: Date | null;
+    startedAt?: Date | null;
+    acceptedAt?: Date | null;
+  },
+  reward: { remainingValue: number } | null,
+  now: Date,
+) {
+  if (!reward || reward.remainingValue <= 0) return false;
+  const timerBase = getChatFreeWindowBase(session);
+  if (!timerBase) return false;
+  return now.getTime() - timerBase.getTime() < reward.remainingValue * 60 * 1000;
+}
+
+function buildChatMessageChargeReason(params: {
+  sessionCode: string;
+  messageId: string;
+  senderRole: "USER" | "PARTNER";
+}) {
+  return `Chat message charge for ${params.sessionCode} (${params.senderRole} message ${params.messageId}) - INR ${CHAT_RATE_PER_MESSAGE}/message`;
+}
+
 function buildGiftMessageBody(gift: {
   key: string;
   name: string;
@@ -881,31 +917,218 @@ sessionsRouter.post(
     const authUser = req.authUser!;
     const session = await findSessionForActor(String(req.params.id), authUser.id);
     if (!session) throw new HttpError(404, "Session not found.");
+    if (session.serviceType !== ServiceType.CHAT) {
+      throw new HttpError(400, "Messages can only be sent in chat sessions.");
+    }
     if (session.status !== SessionStatus.LIVE) {
       throw new HttpError(400, "Messages can only be sent in active sessions.");
     }
+    const senderRole =
+      authUser.id === session.userId
+        ? "USER"
+        : authUser.id === session.companion?.userId
+          ? "PARTNER"
+          : null;
+    if (!senderRole) throw new HttpError(403, "You are not allowed to send messages in this session.");
 
     const payload = sendMessageSchema.parse(req.body);
-    const created = await prisma.chatMessage.create({
-      data: {
-        sessionId: session.id,
-        senderUserId: authUser.id,
-        body: payload.body,
-      },
-      include: {
-        senderUser: {
-          select: {
-            id: true,
-            phoneNumber: true,
-            name: true,
-          },
-        },
-      },
-    });
+    const headerIdempotencyKey =
+      req.get("Idempotency-Key")?.trim() || req.get("X-Idempotency-Key")?.trim() || "";
+    const requestedClientMessageId = payload.clientMessageId ?? headerIdempotencyKey;
+    const clientMessageId = requestedClientMessageId || `server-${randomUUID()}`;
+    const messageId = `msg_${randomUUID().replace(/-/g, "")}`;
+    const now = new Date();
 
-    res.status(201).json({
-      message: toMessageResponse(created, session, authUser.id),
-    });
+    try {
+      const result = await prisma.$transaction(async (tx) => {
+        const existingMessage = await tx.chatMessage.findUnique({
+          where: {
+            sessionId_clientMessageId: {
+              sessionId: session.id,
+              clientMessageId,
+            },
+          },
+          include: {
+            senderUser: {
+              select: {
+                id: true,
+                phoneNumber: true,
+                name: true,
+              },
+            },
+          },
+        });
+        if (existingMessage) {
+          const wallet = await tx.walletAccount.findUnique({
+            where: { userId: session.userId },
+            select: { balance: true },
+          });
+          return {
+            message: existingMessage,
+            walletBalance: wallet?.balance ?? 0,
+            chargeAmount: existingMessage.walletTransactionId ? CHAT_RATE_PER_MESSAGE : 0,
+          };
+        }
+
+        const wallet = await tx.walletAccount.upsert({
+          where: { userId: session.userId },
+          update: {},
+          create: { userId: session.userId },
+        });
+        const freeChatReward = await tx.userReward.findFirst({
+          where: {
+            userId: session.userId,
+            type: LuckyWheelRewardType.FREE_CHAT_MINUTES,
+            status: UserRewardStatus.ACTIVE,
+            redemptionReferenceId: session.id,
+            remainingValue: { gt: 0 },
+            expiresAt: { gt: now },
+          },
+          orderBy: { createdAt: "asc" },
+          select: { id: true, remainingValue: true },
+        });
+        const isFreeMessage = isWithinFreeChatWindow(session, freeChatReward, now);
+        let walletBalance = wallet.balance;
+        let walletTransactionId: string | null = null;
+
+        if (!isFreeMessage) {
+          const debited = await tx.walletAccount.updateMany({
+            where: {
+              id: wallet.id,
+              balance: { gte: CHAT_RATE_PER_MESSAGE },
+            },
+            data: {
+              balance: { decrement: CHAT_RATE_PER_MESSAGE },
+            },
+          });
+
+          if (debited.count === 0) {
+            throw new HttpError(402, CHAT_LOW_BALANCE_MESSAGE);
+          }
+
+          const updatedWallet = await tx.walletAccount.findUnique({
+            where: { id: wallet.id },
+            select: { balance: true },
+          });
+          walletBalance = updatedWallet?.balance ?? walletBalance - CHAT_RATE_PER_MESSAGE;
+
+          const walletTransaction = await tx.walletTransaction.create({
+            data: {
+              transactionCode: createCode("TXN"),
+              walletAccountId: wallet.id,
+              type: TransactionType.BOOKING,
+              amount: -CHAT_RATE_PER_MESSAGE,
+              status: TransactionStatus.SUCCESS,
+              referenceId: messageId,
+              reason: buildChatMessageChargeReason({
+                sessionCode: session.sessionCode,
+                messageId,
+                senderRole,
+              }),
+            },
+          });
+          walletTransactionId = walletTransaction.id;
+
+          const messageSplit = splitAmount(CHAT_RATE_PER_MESSAGE, 30, 70);
+          await tx.partnerEarning.create({
+            data: {
+              companionId: session.companionId,
+              userId: session.userId,
+              sessionId: session.id,
+              walletTransactionId: walletTransaction.id,
+              sourceType: PartnerEarningSourceType.SESSION,
+              grossAmount: messageSplit.grossAmount,
+              partnerAmount: messageSplit.partnerAmount,
+              companyAmount: messageSplit.companyAmount,
+              partnerPercent: messageSplit.partnerPercent,
+              companyPercent: messageSplit.companyPercent,
+              status: PartnerEarningStatus.AVAILABLE,
+            },
+          });
+
+          const companionEarning = Math.max(0, Math.round(messageSplit.partnerAmount));
+          await tx.session.update({
+            where: { id: session.id },
+            data: {
+              amount: { increment: CHAT_RATE_PER_MESSAGE },
+              companionEarning: { increment: companionEarning },
+              platformFee: { increment: CHAT_RATE_PER_MESSAGE - companionEarning },
+              lastHeartbeatAt: now,
+            },
+          });
+        } else {
+          await tx.session.update({
+            where: { id: session.id },
+            data: { lastHeartbeatAt: now },
+          });
+        }
+
+        const created = await tx.chatMessage.create({
+          data: {
+            id: messageId,
+            sessionId: session.id,
+            senderUserId: authUser.id,
+            body: payload.body,
+            clientMessageId,
+            walletTransactionId,
+          },
+          include: {
+            senderUser: {
+              select: {
+                id: true,
+                phoneNumber: true,
+                name: true,
+              },
+            },
+          },
+        });
+
+        return {
+          message: created,
+          walletBalance,
+          chargeAmount: walletTransactionId ? CHAT_RATE_PER_MESSAGE : 0,
+        };
+      });
+
+      res.status(201).json({
+        message: toMessageResponse(result.message, session, authUser.id),
+        walletBalance: result.walletBalance,
+        chargeAmount: result.chargeAmount,
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        const existingMessage = await prisma.chatMessage.findUnique({
+          where: {
+            sessionId_clientMessageId: {
+              sessionId: session.id,
+              clientMessageId,
+            },
+          },
+          include: {
+            senderUser: {
+              select: {
+                id: true,
+                phoneNumber: true,
+                name: true,
+              },
+            },
+          },
+        });
+        if (existingMessage) {
+          const wallet = await prisma.walletAccount.findUnique({
+            where: { userId: session.userId },
+            select: { balance: true },
+          });
+          res.status(200).json({
+            message: toMessageResponse(existingMessage, session, authUser.id),
+            walletBalance: wallet?.balance ?? 0,
+            chargeAmount: existingMessage.walletTransactionId ? CHAT_RATE_PER_MESSAGE : 0,
+          });
+          return;
+        }
+      }
+      throw error;
+    }
   }),
 );
 
@@ -1314,7 +1537,7 @@ sessionsRouter.post(
           endedAt: null,
           endedByUserId: null,
           lastHeartbeatAt: new Date(),
-          amount: getFixedSessionRate(serviceType),
+          amount: serviceType === ServiceType.CHAT ? 0 : getFixedSessionRate(serviceType),
         },
       });
 
@@ -1357,7 +1580,7 @@ sessionsRouter.post(
     if (creationResult.insufficient) {
       res.status(402).json({
         code: INSUFFICIENT_WALLET_BALANCE_CODE,
-        message: "Please add money to continue.",
+        message: serviceType === ServiceType.CHAT ? CHAT_LOW_BALANCE_MESSAGE : "Please add money to continue.",
         requiredBalance: creationResult.requiredBalance,
         walletBalance: creationResult.walletBalance,
       });
@@ -1506,6 +1729,37 @@ const endSessionHandler = asyncHandler(async (req, res) => {
     ? Math.max(1, Math.floor((now.getTime() - session.startedAt.getTime()) / 1000))
     : session.durationSeconds;
 
+  if (session.serviceType === ServiceType.CHAT) {
+    const updated = await prisma.$transaction(async (tx) => {
+      const markEnded = await tx.session.updateMany({
+        where: {
+          id: session.id,
+          status: { in: ACTIVE_SESSION_STATUSES },
+        },
+        data: {
+          status: SessionStatus.ENDED,
+          endedAt: now,
+          endedByUserId: authUser.id,
+          durationSeconds,
+          lastHeartbeatAt: now,
+        },
+      });
+
+      if (markEnded.count > 0) {
+        await finalizeStartedSessionRewardReservation(tx, session.id, now);
+      }
+
+      const next = await tx.session.findUnique({
+        where: { id: session.id },
+      });
+      if (!next) throw new HttpError(404, "Session not found.");
+      return next;
+    });
+
+    res.json({ session: toSessionResponse(updated, authUser.id) });
+    return;
+  }
+
   const updated = await prisma.$transaction(async (tx) => {
     const wallet = await tx.walletAccount.upsert({
       where: { userId: session.userId },
@@ -1625,33 +1879,42 @@ const endSessionHandler = asyncHandler(async (req, res) => {
     await redeemSessionReward(tx, billing.rewardApplication, session.id, now);
 
     if (chargeSucceeded) {
-      await tx.partnerEarning.upsert({
+      const existingSessionEarning = await tx.partnerEarning.findFirst({
         where: {
-          sourceType_sessionId: {
-            sourceType: PartnerEarningSourceType.SESSION,
-            sessionId: session.id,
-          },
-        },
-        create: {
-          companionId: session.companionId,
-          userId: session.userId,
-          sessionId: session.id,
           sourceType: PartnerEarningSourceType.SESSION,
-          grossAmount: sessionSplit.grossAmount,
-          partnerAmount: sessionSplit.partnerAmount,
-          companyAmount: sessionSplit.companyAmount,
-          partnerPercent: sessionSplit.partnerPercent,
-          companyPercent: sessionSplit.companyPercent,
-          status: PartnerEarningStatus.AVAILABLE,
+          sessionId: session.id,
+          walletTransactionId: null,
         },
-        update: {
-          grossAmount: sessionSplit.grossAmount,
-          partnerAmount: sessionSplit.partnerAmount,
-          companyAmount: sessionSplit.companyAmount,
-          partnerPercent: sessionSplit.partnerPercent,
-          companyPercent: sessionSplit.companyPercent,
-        },
+        select: { id: true },
       });
+
+      if (existingSessionEarning) {
+        await tx.partnerEarning.update({
+          where: { id: existingSessionEarning.id },
+          data: {
+            grossAmount: sessionSplit.grossAmount,
+            partnerAmount: sessionSplit.partnerAmount,
+            companyAmount: sessionSplit.companyAmount,
+            partnerPercent: sessionSplit.partnerPercent,
+            companyPercent: sessionSplit.companyPercent,
+          },
+        });
+      } else {
+        await tx.partnerEarning.create({
+          data: {
+            companionId: session.companionId,
+            userId: session.userId,
+            sessionId: session.id,
+            sourceType: PartnerEarningSourceType.SESSION,
+            grossAmount: sessionSplit.grossAmount,
+            partnerAmount: sessionSplit.partnerAmount,
+            companyAmount: sessionSplit.companyAmount,
+            partnerPercent: sessionSplit.partnerPercent,
+            companyPercent: sessionSplit.companyPercent,
+            status: PartnerEarningStatus.AVAILABLE,
+          },
+        });
+      }
     }
 
     const next = await tx.session.findUnique({

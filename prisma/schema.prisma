@@ -348,15 +348,19 @@ model Session {
 }
 
 model ChatMessage {
-  id           String   @id @default(cuid())
-  sessionId    String
-  session      Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  senderUserId String
-  senderUser   User     @relation("ChatMessageSender", fields: [senderUserId], references: [id], onDelete: Cascade)
-  body         String
-  createdAt    DateTime @default(now())
+  id                  String             @id @default(cuid())
+  sessionId           String
+  session             Session            @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  senderUserId        String
+  senderUser          User               @relation("ChatMessageSender", fields: [senderUserId], references: [id], onDelete: Cascade)
+  body                String
+  clientMessageId     String?
+  walletTransactionId String?            @unique
+  walletTransaction   WalletTransaction? @relation(fields: [walletTransactionId], references: [id], onDelete: SetNull)
+  createdAt           DateTime           @default(now())
 
   @@index([sessionId, createdAt])
+  @@unique([sessionId, clientMessageId])
 }
 
 model WalletAccount {
@@ -383,6 +387,7 @@ model WalletTransaction {
   referenceId      String?
   reason           String?
   partnerEarnings  PartnerEarning[]
+  chatMessage      ChatMessage?
   rewardRedemption UserReward?
   createdAt        DateTime          @default(now())
 }
@@ -450,7 +455,6 @@ model PartnerEarning {
   @@index([companionId, createdAt])
   @@index([sourceType, createdAt])
   @@index([status, createdAt])
-  @@unique([sourceType, sessionId])
   @@unique([walletTransactionId])
 }
 
