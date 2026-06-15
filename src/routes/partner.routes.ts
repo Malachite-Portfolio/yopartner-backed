@@ -422,7 +422,9 @@ partnerRouter.post(
       assertRequiredKycDocument(selfie, authUser.firebaseUid, "Selfie");
       assertRequiredKycDocument(aadhaarFront, authUser.firebaseUid, "Aadhaar Front");
       assertRequiredKycDocument(aadhaarBack, authUser.firebaseUid, "Aadhaar Back");
-      assertRequiredKycDocument(pan, authUser.firebaseUid, "PAN");
+      if (pan.uploaded) {
+        assertRequiredKycDocument(pan, authUser.firebaseUid, "PAN");
+      }
 
       const liveVerificationName = sanitizeOptionalString(payload.liveVerificationName);
       const liveVerificationHobbies = sanitizeOptionalString(payload.liveVerificationHobbies);
@@ -479,10 +481,14 @@ partnerRouter.post(
         aadhaarBackFileName: aadhaarBack.fileName,
         aadhaarBackStoragePath: aadhaarBack.storagePath,
         aadhaarBackUrl: aadhaarBack.url,
-        panUploaded: pan.uploaded,
-        panFileName: pan.fileName,
-        panStoragePath: pan.storagePath,
-        panUrl: pan.url,
+        ...(pan.uploaded
+          ? {
+              panUploaded: pan.uploaded,
+              panFileName: pan.fileName,
+              panStoragePath: pan.storagePath,
+              panUrl: pan.url,
+            }
+          : {}),
         liveVerificationName,
         liveVerificationAge: payload.liveVerificationAge,
         liveVerificationHobbies,
