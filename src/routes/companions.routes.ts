@@ -49,6 +49,8 @@ function toPublicCompanionSummary(
     rating: number;
     availability: CompanionAvailability;
     availabilitySetByAdminAt: Date | null;
+    isPinned: boolean;
+    pinnedAt: Date | null;
     updatedAt: Date;
     profileImageUrl: string | null;
     profileImageStoragePath?: string | null;
@@ -86,6 +88,8 @@ function toPublicCompanionSummary(
     isOnline: effectiveOnline,
     isBusy,
     effectiveStatus,
+    isPinned: companion.isPinned,
+    pinnedAt: companion.pinnedAt,
   };
 }
 
@@ -300,7 +304,7 @@ companionsRouter.get(
       include: {
         partnerApplications: latestApprovedSelfieSelect,
       },
-      orderBy: [{ isOnline: "desc" }, { rating: "desc" }],
+      orderBy: [{ isPinned: "desc" }, { pinnedAt: "desc" }, { isOnline: "desc" }, { rating: "desc" }, { createdAt: "desc" }],
     });
     const visibleCompanions = companions.filter((companion) => isCompanionVisibleForListing(companion));
 
@@ -312,6 +316,14 @@ companionsRouter.get(
     const sortedSummaries = summaries
       .map((companion, index) => ({ companion, index }))
       .sort((first, second) => {
+        const pinnedDelta = Number(Boolean(second.companion.isPinned)) - Number(Boolean(first.companion.isPinned));
+        if (pinnedDelta) return pinnedDelta;
+        if (first.companion.isPinned && second.companion.isPinned) {
+          const firstPinnedAt = first.companion.pinnedAt ? new Date(first.companion.pinnedAt).getTime() : 0;
+          const secondPinnedAt = second.companion.pinnedAt ? new Date(second.companion.pinnedAt).getTime() : 0;
+          const pinnedAtDelta = secondPinnedAt - firstPinnedAt;
+          if (pinnedAtDelta) return pinnedAtDelta;
+        }
         const rankDelta = availabilityRank(first.companion.effectiveStatus) - availabilityRank(second.companion.effectiveStatus);
         return rankDelta || first.index - second.index;
       })

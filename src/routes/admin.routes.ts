@@ -548,6 +548,50 @@ adminRouter.get(
 );
 
 adminRouter.patch(
+  "/companions/:id/pin",
+  asyncHandler(async (req, res) => {
+    const companionId = String(req.params.id ?? "").trim();
+    if (!companionId) throw new HttpError(400, "Partner ID is required.");
+    if (typeof req.body?.isPinned !== "boolean") {
+      throw new HttpError(400, "isPinned must be true or false.");
+    }
+
+    const companion = await prisma.companion.findUnique({ where: { id: companionId } });
+    if (!companion) throw new HttpError(404, "Partner not found.");
+
+    const updated = await prisma.companion.update({
+      where: { id: companion.id },
+      data: {
+        isPinned: req.body.isPinned,
+        pinnedAt: req.body.isPinned ? new Date() : null,
+      },
+    });
+
+    const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
+    const activeSession = await prisma.session.findFirst({
+      where: {
+        companionId: updated.id,
+        status: { in: ACTIVE_SESSION_STATUSES },
+        endedAt: null,
+        updatedAt: { gte: staleThreshold },
+      },
+      select: { id: true },
+    });
+    const effectiveStatus = resolveCompanionAvailability(updated, Boolean(activeSession));
+
+    res.json({
+      companion: {
+        ...withFixedCompanionPrices(updated),
+        isOnline: isCompanionListedOnline(updated, Boolean(activeSession)),
+        isBusy: effectiveStatus === CompanionAvailability.BUSY,
+        effectiveStatus,
+      },
+      message: req.body.isPinned ? "Host pinned successfully" : "Host unpinned successfully",
+    });
+  }),
+);
+
+adminRouter.patch(
   "/companions/:id/availability",
   asyncHandler(async (req, res) => {
     const companionId = String(req.params.id ?? "").trim();

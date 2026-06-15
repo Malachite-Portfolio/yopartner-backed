@@ -209,6 +209,8 @@ model Companion {
   isOnline            Boolean                @default(false)
   availability        CompanionAvailability  @default(OFFLINE)
   availabilitySetByAdminAt DateTime?
+  isPinned            Boolean                @default(false)
+  pinnedAt            DateTime?
   profileImageUrl     String?
   profileImageStoragePath String?
   galleryImageUrls    String[]               @default([])
