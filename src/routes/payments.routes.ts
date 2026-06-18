@@ -8,25 +8,17 @@ import { asyncHandler } from "../utils/asyncHandler";
 import { prisma } from "../db/prisma";
 import { HttpError } from "../utils/http";
 import { assertUserCanAddMoney } from "../utils/moderation";
+import { WALLET_PLANS } from "../config/platformPricing";
 
-const gstRate = 0.18;
 const razorpayOrdersUrl = "https://api.razorpay.com/v1/orders";
 
-const rechargePlanMap: Record<string, { amount: number; bonusRate: number }> = {
-  "100": { amount: 100, bonusRate: 0.05 },
-  "200": { amount: 200, bonusRate: 0.05 },
-  "300": { amount: 300, bonusRate: 0.05 },
-  "400": { amount: 400, bonusRate: 0.05 },
-  "500": { amount: 500, bonusRate: 0.1 },
-  "2000": { amount: 2000, bonusRate: 0.2 },
-};
+const rechargePlanMap = new Map(WALLET_PLANS.map((plan) => [String(plan.pay), plan]));
 
 const razorpayOrderSchema = z.object({
   amount: z.number().int().positive(),
   walletCredit: z.number().int().positive(),
-  gstAmount: z.number().int().nonnegative(),
   bonusAmount: z.number().int().nonnegative(),
-  planId: z.string().trim().min(1).optional(),
+  planId: z.string().trim().min(1),
 });
 
 const razorpayVerifySchema = z.object({
@@ -35,9 +27,8 @@ const razorpayVerifySchema = z.object({
   razorpay_signature: z.string().trim().min(1),
   amount: z.number().int().positive(),
   walletCredit: z.number().int().positive(),
-  gstAmount: z.number().int().nonnegative(),
   bonusAmount: z.number().int().nonnegative(),
-  planId: z.string().trim().min(1).optional(),
+  planId: z.string().trim().min(1),
 });
 
 const webhookSchema = z.object({
@@ -54,60 +45,23 @@ function ensureRazorpayConfigured() {
   }
 }
 
-function roundToRupee(value: number) {
-  return Math.round(value);
-}
-
 function assertRechargeQuote(input: z.infer<typeof razorpayOrderSchema>) {
-  if (input.planId) {
-    const plan = rechargePlanMap[input.planId];
-    if (!plan) throw new HttpError(400, "Invalid recharge plan.");
-
-    const expectedBonus = roundToRupee(plan.amount * plan.bonusRate);
-    const expectedGst = roundToRupee(plan.amount * gstRate);
-    const expectedPay = plan.amount + expectedGst;
-    const expectedCredit = plan.amount + expectedBonus;
-
-    if (
-      input.amount !== expectedPay ||
-      input.walletCredit !== expectedCredit ||
-      input.gstAmount !== expectedGst ||
-      input.bonusAmount !== expectedBonus
-    ) {
-      throw new HttpError(400, "Recharge amount mismatch. Please refresh and try again.");
-    }
-
-    return {
-      baseAmount: plan.amount,
-      payAmount: expectedPay,
-      walletCredit: expectedCredit,
-      gstAmount: expectedGst,
-      bonusAmount: expectedBonus,
-    };
-  }
-
-  if (input.bonusAmount !== 0) {
-    throw new HttpError(400, "Bonus is only available for supported plans.");
-  }
-
-  const inferredBaseAmount = input.walletCredit - input.bonusAmount;
-  if (inferredBaseAmount <= 0) {
-    throw new HttpError(400, "Invalid wallet credit amount.");
-  }
-
-  const expectedGst = roundToRupee(inferredBaseAmount * gstRate);
-  const expectedPay = inferredBaseAmount + expectedGst;
-
-  if (input.gstAmount !== expectedGst || input.amount !== expectedPay) {
+  const plan = rechargePlanMap.get(input.planId);
+  if (!plan) throw new HttpError(400, "Invalid recharge plan.");
+  const expectedBonus = plan.get - plan.pay;
+  if (
+    input.amount !== plan.pay ||
+    input.walletCredit !== plan.get ||
+    input.bonusAmount !== expectedBonus
+  ) {
     throw new HttpError(400, "Recharge amount mismatch. Please refresh and try again.");
   }
 
   return {
-    baseAmount: inferredBaseAmount,
-    payAmount: expectedPay,
-    walletCredit: input.walletCredit,
-    gstAmount: input.gstAmount,
-    bonusAmount: 0,
+    baseAmount: plan.pay,
+    payAmount: plan.pay,
+    walletCredit: plan.get,
+    bonusAmount: expectedBonus,
   };
 }
 
@@ -140,7 +94,7 @@ paymentsRouter.post(
         amount: quote.walletCredit,
         status: TransactionStatus.PENDING,
         gateway: "RAZORPAY",
-        reason: `Wallet recharge initiated (pay=${quote.payAmount}, gst=${quote.gstAmount}, bonus=${quote.bonusAmount}, plan=${body.planId ?? "custom"})`,
+        reason: `Wallet recharge initiated (pay=${quote.payAmount}, bonus=${quote.bonusAmount}, plan=${body.planId})`,
       },
     });
 
@@ -158,9 +112,8 @@ paymentsRouter.post(
         notes: {
           transactionCode: transaction.transactionCode,
           userId: authUser.id,
-          planId: body.planId ?? "custom",
+          planId: body.planId,
           walletCredit: String(quote.walletCredit),
-          gstAmount: String(quote.gstAmount),
           bonusAmount: String(quote.bonusAmount),
         },
       }),
@@ -267,7 +220,7 @@ paymentsRouter.post(
         data: {
           status: TransactionStatus.SUCCESS,
           referenceId: body.razorpay_payment_id,
-          reason: `Razorpay verified (order=${body.razorpay_order_id}, pay=${quote.payAmount}, gst=${quote.gstAmount}, bonus=${quote.bonusAmount}, plan=${body.planId ?? "custom"})`,
+          reason: `Razorpay verified (order=${body.razorpay_order_id}, pay=${quote.payAmount}, bonus=${quote.bonusAmount}, plan=${body.planId})`,
         },
       });
 

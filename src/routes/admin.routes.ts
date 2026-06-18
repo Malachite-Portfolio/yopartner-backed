@@ -181,6 +181,55 @@ function withFixedApplicationPrices<
   };
 }
 
+type AdminApplicationCandidate = {
+  status: PartnerApplicationStatus;
+  updatedAt: Date;
+  applicantUser: {
+    id: string;
+    phoneNumber: string;
+  };
+  companion: {
+    status: CompanionStatus;
+    verificationStatus: VerificationStatus;
+  } | null;
+};
+
+function normalizePartnerPhoneIdentity(phoneNumber: string) {
+  const digits = phoneNumber.replace(/\D/g, "").replace(/^00/, "");
+  return digits.length === 10 ? `91${digits}` : digits;
+}
+
+function adminApplicationPriority(application: AdminApplicationCandidate) {
+  if (application.status === PartnerApplicationStatus.APPROVED) return 4;
+  if (
+    application.companion?.status === CompanionStatus.ACTIVE &&
+    application.companion.verificationStatus === VerificationStatus.VERIFIED
+  ) {
+    return 4;
+  }
+  if (application.status === PartnerApplicationStatus.UNDER_REVIEW) return 3;
+  if (application.status === PartnerApplicationStatus.NEEDS_INFO) return 2;
+  return 1;
+}
+
+function deduplicateAdminApplications<T extends AdminApplicationCandidate>(applications: T[]) {
+  const preferredByIdentity = new Map<string, T>();
+  for (const application of applications) {
+    const normalizedPhone = normalizePartnerPhoneIdentity(application.applicantUser.phoneNumber);
+    const identityKey = normalizedPhone ? `phone:${normalizedPhone}` : `user:${application.applicantUser.id}`;
+    const current = preferredByIdentity.get(identityKey);
+    if (!current) {
+      preferredByIdentity.set(identityKey, application);
+      continue;
+    }
+    const priorityDifference = adminApplicationPriority(application) - adminApplicationPriority(current);
+    if (priorityDifference > 0 || (priorityDifference === 0 && application.updatedAt > current.updatedAt)) {
+      preferredByIdentity.set(identityKey, application);
+    }
+  }
+  return Array.from(preferredByIdentity.values()).sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime());
+}
+
 function getApplicationSelfieProfileMedia(application: {
   selfieStoragePath: string | null;
   selfieUrl: string | null;
@@ -1188,7 +1237,9 @@ adminRouter.get(
       },
       orderBy: { createdAt: "desc" },
     });
-    res.json({ applications: applications.map(withFixedApplicationPrices) });
+    res.json({
+      applications: deduplicateAdminApplications(applications).map(withFixedApplicationPrices),
+    });
   }),
 );
 

@@ -357,6 +357,48 @@ function assertRequiredKycDocument(
 
 export const partnerRouter = Router();
 
+type PartnerApplicationCandidate = {
+  status: PartnerApplicationStatus;
+  updatedAt: Date;
+  companion?: {
+    status: CompanionStatus;
+    verificationStatus: VerificationStatus;
+  } | null;
+};
+
+function partnerIdentityApplicationWhere(authUser: { id: string; phoneNumber: string }): Prisma.PartnerApplicationWhereInput {
+  return {
+    OR: [
+      { applicantUserId: authUser.id },
+      { applicantUser: { phoneNumber: authUser.phoneNumber } },
+    ],
+  };
+}
+
+function isApprovedPartnerApplication(application: PartnerApplicationCandidate) {
+  return application.status === PartnerApplicationStatus.APPROVED || Boolean(
+    application.companion?.status === CompanionStatus.ACTIVE &&
+      application.companion.verificationStatus === VerificationStatus.VERIFIED,
+  );
+}
+
+function partnerApplicationPriority(application: PartnerApplicationCandidate) {
+  if (isApprovedPartnerApplication(application)) return 4;
+  if (application.status === PartnerApplicationStatus.UNDER_REVIEW) return 3;
+  if (application.status === PartnerApplicationStatus.NEEDS_INFO) return 2;
+  return 1;
+}
+
+function selectPreferredPartnerApplication<T extends PartnerApplicationCandidate>(applications: T[]) {
+  return applications.reduce<T | null>((preferred, application) => {
+    if (!preferred) return application;
+    const priorityDifference = partnerApplicationPriority(application) - partnerApplicationPriority(preferred);
+    if (priorityDifference > 0) return application;
+    if (priorityDifference < 0) return preferred;
+    return application.updatedAt > preferred.updatedAt ? application : preferred;
+  }, null);
+}
+
 partnerRouter.post(
   "/applications",
   requireAuth,
@@ -364,6 +406,42 @@ partnerRouter.post(
     const authUser = req.authUser!;
 
     try {
+      const [identityApplications, approvedCompanion] = await Promise.all([
+        prisma.partnerApplication.findMany({
+          where: partnerIdentityApplicationWhere(authUser),
+          include: {
+            companion: {
+              select: { id: true, userId: true, status: true, verificationStatus: true },
+            },
+          },
+          orderBy: { updatedAt: "desc" },
+        }),
+        prisma.companion.findFirst({
+          where: {
+            OR: [
+              { userId: authUser.id },
+              { user: { phoneNumber: authUser.phoneNumber } },
+            ],
+            status: CompanionStatus.ACTIVE,
+            verificationStatus: VerificationStatus.VERIFIED,
+          },
+          select: { id: true, userId: true, status: true, verificationStatus: true },
+        }),
+      ]);
+      const preferredExistingApplication = selectPreferredPartnerApplication(identityApplications);
+      if (
+        (preferredExistingApplication && isApprovedPartnerApplication(preferredExistingApplication)) ||
+        approvedCompanion
+      ) {
+        res.status(200).json({
+          application: preferredExistingApplication,
+          companion: preferredExistingApplication?.companion ?? approvedCompanion,
+          alreadyApproved: true,
+          alreadySubmitted: true,
+        });
+        return;
+      }
+
       const parsed = onboardingSchema.safeParse(req.body);
       if (!parsed.success) {
         const validation = getPartnerApplicationValidationDetails(parsed.error);
@@ -498,38 +576,69 @@ partnerRouter.post(
         liveVerificationSubmittedAt: new Date(),
       };
 
-      const existingEditableApplication = await prisma.partnerApplication.findFirst({
-        where: {
-          applicantUserId: authUser.id,
-          status: {
-            in: [PartnerApplicationStatus.UNDER_REVIEW, PartnerApplicationStatus.NEEDS_INFO],
+      const submission = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`partner-onboarding:${authUser.phoneNumber}`}))`;
+        const existingApplications = await tx.partnerApplication.findMany({
+          where: partnerIdentityApplicationWhere(authUser),
+          include: {
+            companion: {
+              select: { id: true, userId: true, status: true, verificationStatus: true },
+            },
           },
-        },
-        orderBy: { createdAt: "desc" },
-        select: { id: true },
-      });
+          orderBy: { updatedAt: "desc" },
+        });
+        const preferredApplication = selectPreferredPartnerApplication(existingApplications);
+        if (preferredApplication && isApprovedPartnerApplication(preferredApplication)) {
+          return { application: preferredApplication, alreadyApproved: true, created: false };
+        }
 
-      const application = existingEditableApplication
-        ? await prisma.partnerApplication.update({
+        const existingEditableApplication = existingApplications.find((item) =>
+          item.status === PartnerApplicationStatus.UNDER_REVIEW ||
+          item.status === PartnerApplicationStatus.NEEDS_INFO,
+        );
+        if (existingEditableApplication) {
+          const application = await tx.partnerApplication.update({
             where: { id: existingEditableApplication.id },
             data: {
               ...applicationData,
               status: PartnerApplicationStatus.UNDER_REVIEW,
             },
-          })
-        : await prisma.partnerApplication.create({
-            data: {
-              applicantUserId: authUser.id,
-              ...applicationData,
+            include: {
+              companion: {
+                select: { id: true, userId: true, status: true, verificationStatus: true },
+              },
             },
           });
+          return { application, alreadyApproved: false, created: false };
+        }
 
-      await prisma.user.update({
-        where: { id: authUser.id },
-        data: { role: Role.PARTNER, name: payload.fullName },
+        const application = await tx.partnerApplication.create({
+          data: {
+            applicantUserId: authUser.id,
+            ...applicationData,
+          },
+          include: {
+            companion: {
+              select: { id: true, userId: true, status: true, verificationStatus: true },
+            },
+          },
+        });
+        return { application, alreadyApproved: false, created: true };
       });
 
-      res.status(existingEditableApplication ? 200 : 201).json({ application });
+      if (!submission.alreadyApproved) {
+        await prisma.user.update({
+          where: { id: authUser.id },
+          data: { role: Role.PARTNER, name: payload.fullName },
+        });
+      }
+
+      res.status(submission.created ? 201 : 200).json({
+        application: submission.application,
+        companion: submission.application.companion,
+        alreadyApproved: submission.alreadyApproved,
+        alreadySubmitted: true,
+      });
     } catch (error) {
       const httpStatus = error instanceof HttpError ? error.statusCode : undefined;
       const detail =
@@ -574,11 +683,12 @@ partnerRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const application = await prisma.partnerApplication.findFirst({
-      where: { applicantUserId: authUser.id },
+    const applications = await prisma.partnerApplication.findMany({
+      where: partnerIdentityApplicationWhere(authUser),
       include: { companion: true },
-      orderBy: { createdAt: "desc" },
+      orderBy: { updatedAt: "desc" },
     });
+    const application = selectPreferredPartnerApplication(applications);
     res.json({ application });
   }),
 );
@@ -588,10 +698,11 @@ partnerRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const application = await prisma.partnerApplication.findFirst({
-      where: { applicantUserId: authUser.id },
-      orderBy: { createdAt: "desc" },
+    const applications = await prisma.partnerApplication.findMany({
+      where: partnerIdentityApplicationWhere(authUser),
+      orderBy: { updatedAt: "desc" },
     });
+    const application = selectPreferredPartnerApplication(applications);
     res.json({ application });
   }),
 );
@@ -601,13 +712,14 @@ partnerRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const authUser = req.authUser!;
-    const [companion, application] = await Promise.all([
+    const [companion, applications] = await Promise.all([
       prisma.companion.findFirst({ where: { userId: authUser.id } }),
-      prisma.partnerApplication.findFirst({
-        where: { applicantUserId: authUser.id },
-        orderBy: { createdAt: "desc" },
+      prisma.partnerApplication.findMany({
+        where: partnerIdentityApplicationWhere(authUser),
+        orderBy: { updatedAt: "desc" },
       }),
     ]);
+    const application = selectPreferredPartnerApplication(applications);
     assertPartnerDashboardAccess(companion);
 
     const isApproved = Boolean(
@@ -996,12 +1108,11 @@ partnerRouter.get(
       where: { userId: authUser.id },
     });
     assertPartnerDashboardAccess(companion);
-    const application = await prisma.partnerApplication.findFirst({
-      where: {
-        applicantUserId: authUser.id,
-      },
-      orderBy: { createdAt: "desc" },
+    const applications = await prisma.partnerApplication.findMany({
+      where: partnerIdentityApplicationWhere(authUser),
+      orderBy: { updatedAt: "desc" },
     });
+    const application = selectPreferredPartnerApplication(applications);
     res.json({ companion, application });
   }),
 );

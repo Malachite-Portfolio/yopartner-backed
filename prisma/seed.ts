@@ -6,6 +6,7 @@ import {
   ServiceType,
   VerificationStatus,
 } from "@prisma/client";
+import { CHAT_RATE_PER_MESSAGE } from "../src/config/platformPricing";
 
 const prisma = new PrismaClient();
 
@@ -52,7 +53,7 @@ async function upsertDemoHost() {
       category: "Communication & Emotional Support",
       languages: ["Hindi", "English"],
       servicesOffered: [ServiceType.CHAT, ServiceType.AUDIO, ServiceType.VIDEO],
-      chatPrice: 10,
+      chatPrice: CHAT_RATE_PER_MESSAGE,
       audioPrice: 20,
       videoPrice: 40,
       rating: 5,
@@ -69,7 +70,7 @@ async function upsertDemoHost() {
       category: "Communication & Emotional Support",
       languages: ["Hindi", "English"],
       servicesOffered: [ServiceType.CHAT, ServiceType.AUDIO, ServiceType.VIDEO],
-      chatPrice: 10,
+      chatPrice: CHAT_RATE_PER_MESSAGE,
       audioPrice: 20,
       videoPrice: 40,
       rating: 5,
