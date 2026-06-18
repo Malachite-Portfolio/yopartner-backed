@@ -152,7 +152,9 @@ function resolveKycStorageObject(storagePath: string | null, url: string | null)
   return null;
 }
 
-function withFixedCompanionPrices<T extends { chatPrice?: number; audioPrice?: number; videoPrice?: number }>(companion: T) {
+function withFixedCompanionPrices<
+  T extends { chatPrice?: number | Prisma.Decimal; audioPrice?: number; videoPrice?: number },
+>(companion: T) {
   return {
     ...companion,
     chatPrice: CHAT_RATE_PER_MIN,
@@ -163,12 +165,12 @@ function withFixedCompanionPrices<T extends { chatPrice?: number; audioPrice?: n
 
 function withFixedApplicationPrices<
   T extends {
-    chatPrice?: number;
+    chatPrice?: number | Prisma.Decimal;
     audioPrice?: number;
     videoPrice?: number;
     homeVisitRequested?: boolean;
     homeVisitPrice?: number | null;
-    companion?: ({ chatPrice?: number; audioPrice?: number; videoPrice?: number } | null);
+    companion?: ({ chatPrice?: number | Prisma.Decimal; audioPrice?: number; videoPrice?: number } | null);
   },
 >(application: T) {
   return {

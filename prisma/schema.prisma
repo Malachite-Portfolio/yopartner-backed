@@ -191,7 +191,7 @@ model Companion {
   category            String?
   languages           String[]
   servicesOffered     ServiceType[]
-  chatPrice           Int                    @default(0)
+  chatPrice           Decimal                @default(2.5) @db.Decimal(10, 2)
   audioPrice          Int                    @default(0)
   videoPrice          Int                    @default(0)
   rating              Float                  @default(0)
@@ -248,7 +248,7 @@ model PartnerApplication {
   profileTagline     String
   aboutYourself      String
   servicesOffered    ServiceType[]
-  chatPrice          Int                      @default(0)
+  chatPrice          Decimal                  @default(2.5) @db.Decimal(10, 2)
   audioPrice         Int                      @default(0)
   videoPrice         Int                      @default(0)
   homeVisitRequested Boolean                  @default(false)

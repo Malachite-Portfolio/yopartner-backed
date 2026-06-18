@@ -5,6 +5,7 @@ import {
   HomeVisitVerificationStatus,
   PartnerModerationStatus,
   PartnerApplicationStatus,
+  Prisma,
   SessionStatus,
   VerificationStatus,
 } from "@prisma/client";
@@ -43,7 +44,7 @@ function toPublicCompanionSummary(
     category: string | null;
     languages: string[];
     servicesOffered: unknown[];
-    chatPrice: number;
+    chatPrice: number | Prisma.Decimal;
     audioPrice: number;
     videoPrice: number;
     rating: number;

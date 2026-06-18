@@ -51,7 +51,7 @@ const onboardingSchema = z.object({
   profileTagline: z.string().min(6),
   aboutYourself: z.string().min(80),
   servicesOffered: z.array(z.string()).min(1),
-  chatPrice: z.coerce.number().int().nonnegative().optional(),
+  chatPrice: z.coerce.number().positive().optional(),
   audioPrice: z.coerce.number().int().nonnegative().optional(),
   videoPrice: z.coerce.number().int().nonnegative().optional(),
   homeVisitRequested: z.boolean().optional(),
