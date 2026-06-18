@@ -1466,6 +1466,26 @@ sessionsRouter.post(
       orderBy: { createdAt: "desc" },
     });
     if (existingPending) {
+      if (serviceType === ServiceType.CHAT) {
+        const now = new Date();
+        const updatedChatSession = await prisma.session.update({
+          where: { id: existingPending.id },
+          data: {
+            status: SessionStatus.LIVE,
+            acceptedAt: existingPending.acceptedAt ?? now,
+            startedAt: existingPending.startedAt ?? now,
+            liveStartedAt: existingPending.liveStartedAt ?? now,
+            lastHeartbeatAt: now,
+          },
+          include: { user: true, companion: true, booking: true },
+        });
+        const metadata = await getSessionRewardAndBillingMetadata(updatedChatSession);
+        res.status(200).json({
+          session: toSessionResponse(updatedChatSession, authUser.id, metadata.rewardMetadata, metadata.billingLimit),
+        });
+        return;
+      }
+
       res.status(200).json({
         session: toSessionResponse(existingPending, authUser.id),
       });
@@ -1500,6 +1520,8 @@ sessionsRouter.post(
     }
 
     const sessionId = createSessionId();
+    const now = new Date();
+    const isChatSession = serviceType === ServiceType.CHAT;
     const creationResult = await prisma.$transaction(async (tx) => {
       await normalizeUserRewardReservations(tx, authUser.id);
       const wallet = await tx.walletAccount.upsert({
@@ -1531,12 +1553,13 @@ sessionsRouter.post(
           userId: authUser.id,
           companionId: body.companionId,
           serviceType,
-          status: SessionStatus.PENDING,
-          acceptedAt: null,
-          startedAt: null,
+          status: isChatSession ? SessionStatus.LIVE : SessionStatus.PENDING,
+          acceptedAt: isChatSession ? now : null,
+          startedAt: isChatSession ? now : null,
+          liveStartedAt: isChatSession ? now : null,
           endedAt: null,
           endedByUserId: null,
-          lastHeartbeatAt: new Date(),
+          lastHeartbeatAt: now,
           amount: serviceType === ServiceType.CHAT ? 0 : getFixedSessionRate(serviceType),
         },
       });
@@ -1572,7 +1595,7 @@ sessionsRouter.post(
           serviceType,
           walletBalance: wallet.balance,
           rewardApplication: rewardAdjustedMinimum.rewardApplication,
-          timerBase: null,
+          timerBase: session.liveStartedAt ?? session.startedAt ?? null,
         }),
       };
     });
