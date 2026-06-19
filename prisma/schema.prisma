@@ -179,6 +179,7 @@ model User {
   luckyWheelSpins LuckyWheelSpin[]
   rewards        UserReward[]
   pushSubscriptions PushSubscription[]
+  fcmDeviceTokens FcmDeviceToken[]
 }
 
 model Companion {
@@ -225,6 +226,7 @@ model Companion {
   reviews             Review[]               @relation("CompanionReviews")
   verificationRecord  VerificationRecord?
   pushSubscriptions   PushSubscription[]
+  fcmDeviceTokens      FcmDeviceToken[]
 }
 
 model PartnerApplication {
@@ -486,6 +488,24 @@ model PushSubscription {
   userAgent   String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+  revokedAt   DateTime?
+
+  @@index([userId, revokedAt])
+  @@index([companionId, revokedAt])
+}
+
+model FcmDeviceToken {
+  id          String     @id @default(cuid())
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companionId String?
+  companion   Companion? @relation(fields: [companionId], references: [id], onDelete: SetNull)
+  token       String     @unique
+  platform    String     @default("android")
+  appPackage  String?
+  appVersion  String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
   revokedAt   DateTime?
 
   @@index([userId, revokedAt])

@@ -28,7 +28,7 @@ import {
   assertUserCanStartSession,
 } from "../utils/moderation";
 import { CHAT_RATE_PER_MESSAGE, getFixedSessionRate } from "../config/platformPricing";
-import { sendIncomingRequestPush } from "../services/pushNotifications";
+import { sendIncomingRequestPush, sendPartnerChatMessagePush } from "../services/pushNotifications";
 import {
   finalizeStartedSessionRewardReservation,
   normalizeUserRewardReservations,
@@ -967,6 +967,7 @@ sessionsRouter.post(
             message: existingMessage,
             walletBalance: wallet?.balance ?? 0,
             chargeAmount: existingMessage.walletTransactionId ? CHAT_RATE_PER_MESSAGE : 0,
+            wasCreated: false,
           };
         }
 
@@ -1087,6 +1088,7 @@ sessionsRouter.post(
           message: created,
           walletBalance,
           chargeAmount: walletTransactionId ? CHAT_RATE_PER_MESSAGE : 0,
+          wasCreated: true,
         };
       });
 
@@ -1095,6 +1097,21 @@ sessionsRouter.post(
         walletBalance: result.walletBalance,
         chargeAmount: result.chargeAmount,
       });
+      if (senderRole === "USER" && result.wasCreated) {
+        void sendPartnerChatMessagePush({
+          sessionId: session.id,
+          companionId: session.companionId,
+          messageId: result.message.id,
+          messageBody: result.message.body,
+          senderLabel: result.message.senderUser?.name || "New message",
+        }).catch((error) => {
+          console.error("[push] chat message FCM dispatch failed", {
+            sessionId: session.id,
+            companionId: session.companionId,
+            error: error instanceof Error ? { name: error.name, message: error.message } : { message: "Push dispatch failed" },
+          });
+        });
+      }
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         const existingMessage = await prisma.chatMessage.findUnique({
@@ -1396,7 +1413,7 @@ sessionsRouter.post(
     const body = createSessionSchema.parse(req.body);
     const requester = await prisma.user.findUnique({
       where: { id: authUser.id },
-      select: { moderationStatus: true, moderationExpiresAt: true },
+      select: { moderationStatus: true, moderationExpiresAt: true, name: true },
     });
     if (!requester) throw new HttpError(404, "User not found.");
     assertUserCanStartSession(requester);
@@ -1615,11 +1632,12 @@ sessionsRouter.post(
       id: session.id,
       companionId: session.companionId,
       serviceType: session.serviceType,
+      callerLabel: requester.name || "A member is calling",
     }).catch((error) => {
       console.error("[push] incoming request dispatch failed", {
         sessionId: session.id,
         companionId: session.companionId,
-        error,
+        error: error instanceof Error ? { name: error.name, message: error.message } : { message: "Push dispatch failed" },
       });
     });
     res.status(201).json({

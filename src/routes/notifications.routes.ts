@@ -24,6 +24,17 @@ const deletePushSubscriptionSchema = z.object({
   endpoint: z.string().url().max(2048).optional(),
 });
 
+const fcmTokenSchema = z.object({
+  token: z.string().trim().min(20).max(4096),
+  platform: z.literal("android").default("android"),
+  appPackage: z.string().trim().max(120).optional(),
+  appVersion: z.string().trim().max(80).optional(),
+});
+
+const deleteFcmTokenSchema = z.object({
+  token: z.string().trim().min(20).max(4096),
+});
+
 export const notificationsRouter = Router();
 
 notificationsRouter.get(
@@ -41,12 +52,19 @@ notificationsRouter.get(
         revokedAt: null,
       },
     });
+    const activeFcmTokens = await prisma.fcmDeviceToken.count({
+      where: {
+        userId: authUser.id,
+        revokedAt: null,
+      },
+    });
 
     res.json({
       enabled: isWebPushEnabled(),
       configured: isWebPushConfigured(),
       publicKey: env.VAPID_PUBLIC_KEY || null,
       activeSubscriptions,
+      activeFcmTokens,
     });
   }),
 );
@@ -100,6 +118,76 @@ notificationsRouter.post(
     res.status(201).json({
       subscription,
       message: "Push notifications enabled.",
+    });
+  }),
+);
+
+notificationsRouter.post(
+  "/fcm-tokens",
+  requireAuth,
+  requireRole([Role.PARTNER]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const payload = fcmTokenSchema.parse(req.body);
+    const companion = await prisma.companion.findFirst({ where: { userId: authUser.id } });
+    assertPartnerDashboardAccess(companion);
+    if (!companion) {
+      throw new HttpError(404, "Partner profile not found.");
+    }
+
+    const token = await prisma.fcmDeviceToken.upsert({
+      where: { token: payload.token },
+      create: {
+        userId: authUser.id,
+        companionId: companion.id,
+        token: payload.token,
+        platform: payload.platform,
+        appPackage: payload.appPackage,
+        appVersion: payload.appVersion,
+      },
+      update: {
+        userId: authUser.id,
+        companionId: companion.id,
+        platform: payload.platform,
+        appPackage: payload.appPackage,
+        appVersion: payload.appVersion,
+        revokedAt: null,
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    res.status(201).json({
+      token,
+      message: "App notifications are active on this device.",
+    });
+  }),
+);
+
+notificationsRouter.delete(
+  "/fcm-tokens",
+  requireAuth,
+  requireRole([Role.PARTNER]),
+  asyncHandler(async (req, res) => {
+    const authUser = req.authUser!;
+    const payload = deleteFcmTokenSchema.parse(req.body ?? {});
+    const revoked = await prisma.fcmDeviceToken.updateMany({
+      where: {
+        userId: authUser.id,
+        token: payload.token,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: new Date(),
+      },
+    });
+
+    res.json({
+      revoked: revoked.count,
+      message: "App notifications disabled on this device.",
     });
   }),
 );

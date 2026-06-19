@@ -1,5 +1,6 @@
 import { cert, getApp, getApps, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
+import { getMessaging } from "firebase-admin/messaging";
 import { getStorage } from "firebase-admin/storage";
 import { env } from "./env";
 
@@ -37,4 +38,5 @@ if (isFirebaseAdminConfigured()) {
 }
 
 export const firebaseAdminAuth = app ? getAuth(app) : null;
+export const firebaseAdminMessaging = app ? getMessaging(app) : null;
 export const firebaseAdminStorage = app ? getStorage(app) : null;
