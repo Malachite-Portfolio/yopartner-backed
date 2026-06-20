@@ -1424,6 +1424,13 @@ sessionsRouter.post(
     if (companion.status !== CompanionStatus.ACTIVE || companion.verificationStatus !== VerificationStatus.VERIFIED) {
       throw new HttpError(403, "Partner is not available for new sessions yet.");
     }
+    const serviceType =
+      body.serviceType === "chat"
+        ? ServiceType.CHAT
+        : body.serviceType === "audio"
+          ? ServiceType.AUDIO
+          : ServiceType.VIDEO;
+
     const staleThreshold = new Date(Date.now() - STALE_ACTIVE_SESSION_MS);
     const activeChatBetweenPair = await prisma.session.findFirst({
       where: {
@@ -1440,16 +1447,9 @@ sessionsRouter.post(
     if (companion.availability === CompanionAvailability.BUSY && !hasActiveChatEscalationContext) {
       throw new HttpError(409, "Partner is currently busy.");
     }
-    if (!isCompanionOnlineForRequests(companion) && !hasActiveChatEscalationContext) {
-      throw new HttpError(409, "Partner is currently offline.");
+    if (serviceType !== ServiceType.CHAT && !isCompanionOnlineForRequests(companion)) {
+      throw new HttpError(409, "Host is offline. Please try later.");
     }
-
-    const serviceType =
-      body.serviceType === "chat"
-        ? ServiceType.CHAT
-        : body.serviceType === "audio"
-          ? ServiceType.AUDIO
-          : ServiceType.VIDEO;
 
     if (!companion.servicesOffered.includes(serviceType)) {
       throw new HttpError(400, "This service is not offered by the selected partner.");
