@@ -638,10 +638,6 @@ function hashToPositiveInt(input: string) {
   return (hash % 2147483640) + 1;
 }
 
-function buildAgoraUid(sessionId: string, userId: string) {
-  return hashToPositiveInt(`${sessionId}:${userId}`);
-}
-
 function buildAgoraUidForActor(sessionId: string, authUserId: string, companionOwnerUserId: string | null, requestUserId: string) {
   const actorScope = authUserId === requestUserId ? "member" : authUserId === companionOwnerUserId ? "partner" : "actor";
   const hash = hashToPositiveInt(`${sessionId}:${authUserId}:${actorScope}`) % 90000000;
@@ -793,8 +789,6 @@ function toSessionResponse(session: {
       : null,
     reward: rewardMetadata,
     billingLimit,
-    agoraToken: null,
-    agoraUid: buildAgoraUid(session.id, authUserId),
   };
 }
 
@@ -850,6 +844,9 @@ sessionsRouter.get(
   "/:id/agora-token",
   requireAuth,
   asyncHandler(async (req, res) => {
+    if (env.CALL_PROVIDER !== "agora") {
+      throw new HttpError(410, "Agora calling is disabled. Use the configured call provider.");
+    }
     const authUser = req.authUser!;
     const session = await findSessionForActor(String(req.params.id), authUser.id);
     if (!session) throw new HttpError(404, "Session not found.");

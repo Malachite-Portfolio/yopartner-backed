@@ -23,6 +23,9 @@ agoraRouter.post(
   "/token/rtc",
   requireAuth,
   asyncHandler(async (req, res) => {
+    if (env.CALL_PROVIDER !== "agora") {
+      throw new HttpError(410, "Agora RTC is disabled. Use the configured call provider.");
+    }
     if (!env.NEXT_PUBLIC_AGORA_APP_ID || !env.AGORA_APP_CERTIFICATE) {
       throw new HttpError(503, "Agora RTC config is missing.");
     }

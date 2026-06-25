@@ -22,6 +22,11 @@ const envSchema = z.object({
   AGORA_CHAT_APP_KEY: z.string().optional(),
   AGORA_CHAT_ORG_NAME: z.string().optional(),
   AGORA_CHAT_APP_NAME: z.string().optional(),
+  CALL_PROVIDER: z.enum(["agora", "zegocloud"]).default("zegocloud"),
+  ZEGO_APP_ID: z.string().optional().default(""),
+  ZEGO_SERVER_SECRET: z.string().optional().default(""),
+  ZEGO_TOKEN_EXPIRE_SECONDS: z.string().optional().default("3600"),
+  ZEGO_TOKEN_ENDPOINT: z.string().optional().default("/api/calls/zego-token"),
   RAZORPAY_KEY_ID: z.string().optional().default(""),
   RAZORPAY_KEY_SECRET: z.string().optional().default(""),
   ENABLE_WEB_PUSH_NOTIFICATIONS: z.string().optional().default("false"),
@@ -40,5 +45,7 @@ if (!parsedEnv.success) {
 export const env = {
   ...parsedEnv.data,
   PORT: Number(parsedEnv.data.PORT),
+  ZEGO_APP_ID: Number(parsedEnv.data.ZEGO_APP_ID || 0),
+  ZEGO_TOKEN_EXPIRE_SECONDS: Number(parsedEnv.data.ZEGO_TOKEN_EXPIRE_SECONDS || 3600),
   FIREBASE_ADMIN_PRIVATE_KEY: parsedEnv.data.FIREBASE_ADMIN_PRIVATE_KEY.replace(/\\n/g, "\n"),
 };

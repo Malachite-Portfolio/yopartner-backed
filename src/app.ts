@@ -18,6 +18,7 @@ import { usersRouter } from "./routes/users.routes";
 import { paymentsRouter } from "./routes/payments.routes";
 import { luckyWheelRouter } from "./routes/luckyWheel.routes";
 import { notificationsRouter } from "./routes/notifications.routes";
+import { callsRouter } from "./routes/calls.routes";
 import { notFoundHandler } from "./middlewares/notFound";
 import { errorHandler } from "./middlewares/errorHandler";
 
@@ -51,10 +52,13 @@ app.use("/api/wallet", walletRouter);
 app.use("/api/users", usersRouter);
 app.use("/api/lucky-wheel", luckyWheelRouter);
 app.use("/api/notifications", notificationsRouter);
+app.use("/api/calls", callsRouter);
 app.use("/api/admin/auth", adminAuthRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/agora", agoraRouter);
 app.use("/api/payments", paymentsRouter);
+
+console.info("[call-provider] selected", { provider: env.CALL_PROVIDER });
 
 app.use(notFoundHandler);
 app.use(errorHandler);
